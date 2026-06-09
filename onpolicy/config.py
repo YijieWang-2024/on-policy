@@ -96,6 +96,8 @@ def get_config():
             number of batches for ppo (default: 1)
         --entropy_coef <float>
             entropy term coefficient (default: 0.01)
+        --target_kl <float>
+            optional approximate-KL threshold for early stopping PPO epochs.
         --use_max_grad_norm 
             by default, use max norm of gradients. If set, do not use.
         --max_grad_norm <float>
@@ -106,8 +108,6 @@ def get_config():
             discount factor for rewards (default: 0.99)
         --gae_lambda <float>
             gae lambda parameter (default: 0.95)
-        --use_proper_time_limits
-            by default, the return value does consider limits of time. If set, compute returns with considering time limits factor.
         --use_huber_loss
             by default, use huber loss. If set, do not use huber loss.
         --use_value_active_masks
@@ -240,6 +240,8 @@ def get_config():
                         help='number of batches for ppo (default: 1)')
     parser.add_argument("--entropy_coef", type=float, default=0.01,
                         help='entropy term coefficient (default: 0.01)')
+    parser.add_argument("--target_kl", type=float, default=None,
+                        help="optional approximate-KL threshold for early stopping PPO epochs")
     parser.add_argument("--value_loss_coef", type=float,
                         default=1, help='value loss coefficient (default: 0.5)')
     parser.add_argument("--use_max_grad_norm",
@@ -252,8 +254,6 @@ def get_config():
                         help='discount factor for rewards (default: 0.99)')
     parser.add_argument("--gae_lambda", type=float, default=0.95,
                         help='gae lambda parameter (default: 0.95)')
-    parser.add_argument("--use_proper_time_limits", action='store_true',
-                        default=False, help='compute returns taking into account time limits')
     parser.add_argument("--use_huber_loss", action='store_false', default=True, help="by default, use huber loss. If set, do not use huber loss.")
     parser.add_argument("--use_value_active_masks",
                         action='store_false', default=True, help="by default True, whether to mask useless data in value loss.")

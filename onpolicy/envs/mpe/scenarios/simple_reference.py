@@ -38,9 +38,9 @@ class Scenario(BaseScenario):
             agent.goal_b = None
         # want other agent to go to the goal landmark
         world.agents[0].goal_a = world.agents[1]
-        world.agents[0].goal_b = np.random.choice(world.landmarks)
+        world.agents[0].goal_b = world.np_random.choice(world.landmarks)
         world.agents[1].goal_a = world.agents[0]
-        world.agents[1].goal_b = np.random.choice(world.landmarks)
+        world.agents[1].goal_b = world.np_random.choice(world.landmarks)
         # random properties for agents
         world.assign_agent_colors()
         # random properties for landmarks
@@ -52,11 +52,11 @@ class Scenario(BaseScenario):
         world.agents[1].goal_a.color = world.agents[1].goal_b.color
         # set random initial states
         for agent in world.agents:
-            agent.state.p_pos = np.random.uniform(-1, +1, world.dim_p)
+            agent.state.p_pos = world.np_random.uniform(-1, +1, world.dim_p)
             agent.state.p_vel = np.zeros(world.dim_p)
             agent.state.c = np.zeros(world.dim_c)
         for i, landmark in enumerate(world.landmarks):
-            landmark.state.p_pos = 0.8 * np.random.uniform(-1, +1, world.dim_p)
+            landmark.state.p_pos = 0.8 * world.np_random.uniform(-1, +1, world.dim_p)
             landmark.state.p_vel = np.zeros(world.dim_p)
 
     def reward(self, agent, world):

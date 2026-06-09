@@ -1,6 +1,5 @@
-import gym
-from gym import spaces
-from gym.envs.registration import EnvSpec
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 from .multi_discrete import MultiDiscrete
 
@@ -11,7 +10,7 @@ cam_range = 2
 # currently code assumes that no agents will be created/destroyed at runtime!
 class MultiAgentEnv(gym.Env):
     metadata = {
-        'render.modes': ['human', 'rgb_array']
+        'render_modes': ['human', 'rgb_array']
     }
 
     def __init__(self, world, reset_callback=None, reward_callback=None,
@@ -105,18 +104,12 @@ class MultiAgentEnv(gym.Env):
             self.viewers = [None] * self.n
         self._reset_render()
 
-    def seed(self, seed=None):
-        if seed is None:
-            np.random.seed(1)
-        else:
-            np.random.seed(seed)
-
     # step  this is  env.step()
     def step(self, action_n):
         self.current_step += 1
         obs_n = []
         reward_n = []
-        done_n = []
+        terminated_n = []
         info_n = []
         self.agents = self.world.policy_agents
         # set action for each agent
@@ -128,7 +121,7 @@ class MultiAgentEnv(gym.Env):
         for i, agent in enumerate(self.agents):
             obs_n.append(self._get_obs(agent))
             reward_n.append([self._get_reward(agent)])
-            done_n.append(self._get_done(agent))
+            terminated_n.append(self._get_terminated(agent))
             info = {'individual_reward': self._get_reward(agent)}
             env_info = self._get_info(agent)
             if 'fail' in env_info.keys():
@@ -143,9 +136,13 @@ class MultiAgentEnv(gym.Env):
         if self.post_step_callback is not None:
             self.post_step_callback(self.world)
 
-        return obs_n, reward_n, done_n, info_n
+        truncated = self.current_step >= self.world_length
+        truncated_n = [truncated] * self.n
+        return obs_n, reward_n, terminated_n, truncated_n, info_n
 
-    def reset(self):
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.world.np_random = self.np_random
         self.current_step = 0
         # reset world
         self.reset_callback(self.world)
@@ -158,7 +155,7 @@ class MultiAgentEnv(gym.Env):
         for agent in self.agents:
             obs_n.append(self._get_obs(agent))
 
-        return obs_n
+        return obs_n, {}
 
     # get info used for benchmarking
     def _get_info(self, agent):
@@ -169,17 +166,14 @@ class MultiAgentEnv(gym.Env):
     # get observation for a particular agent
     def _get_obs(self, agent):
         if self.observation_callback is None:
-            return np.zeros(0)
-        return self.observation_callback(agent, self.world)
+            return np.zeros(0, dtype=np.float32)
+        return np.asarray(self.observation_callback(agent, self.world), dtype=np.float32)
 
     # get dones for a particular agent
     # unused right now -- agents are allowed to go beyond the viewing screen
-    def _get_done(self, agent):
+    def _get_terminated(self, agent):
         if self.done_callback is None:
-            if self.current_step >= self.world_length:
-                return True
-            else:
-                return False
+            return False
         return self.done_callback(agent, self.world)
 
     # get reward for a particular agent
@@ -288,14 +282,12 @@ class MultiAgentEnv(gym.Env):
 
             if self.viewers[i] is None:
                 # import rendering only if we need it (and don't import for headless machines)
-                #from gym.envs.classic_control import rendering
                 from . import rendering
                 self.viewers[i] = rendering.Viewer(700, 700)
 
         # create rendering geometry
         if self.render_geoms is None:
             # import rendering only if we need it (and don't import for headless machines)
-            #from gym.envs.classic_control import rendering
             from . import rendering
             self.render_geoms = []
             self.render_geoms_xform = []

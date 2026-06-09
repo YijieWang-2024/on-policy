@@ -58,20 +58,20 @@ class Scenario(BaseScenario):
         for color, landmark in zip(color_list, world.landmarks):
             landmark.color = color
         # set goal landmark
-        goal = np.random.choice(world.landmarks)
+        goal = world.np_random.choice(world.landmarks)
         world.agents[1].color = goal.color
-        world.agents[2].key = np.random.choice(world.landmarks).color
+        world.agents[2].key = world.np_random.choice(world.landmarks).color
 
         for agent in world.agents:
             agent.goal_a = goal
 
         # set random initial states
         for agent in world.agents:
-            agent.state.p_pos = np.random.uniform(-1, +1, world.dim_p)
+            agent.state.p_pos = world.np_random.uniform(-1, +1, world.dim_p)
             agent.state.p_vel = np.zeros(world.dim_p)
             agent.state.c = np.zeros(world.dim_c)
         for i, landmark in enumerate(world.landmarks):
-            landmark.state.p_pos = np.random.uniform(-1, +1, world.dim_p)
+            landmark.state.p_pos = world.np_random.uniform(-1, +1, world.dim_p)
             landmark.state.p_vel = np.zeros(world.dim_p)
 
 
@@ -127,8 +127,6 @@ class Scenario(BaseScenario):
         if agent.goal_a is not None:
             goal_color = agent.goal_a.color
 
-        #print('goal color in obs is {}'.format(goal_color))
-
         # get positions of all entities in this agent's reference frame
         entity_pos = []
         for entity in world.landmarks:
@@ -139,33 +137,17 @@ class Scenario(BaseScenario):
             if other is agent or (other.state.c is None) or not other.speaker: continue
             comm.append(other.state.c)
 
-        confer = np.array([0])
-
         if world.agents[2].key is None:
-            confer = np.array([1])
             key = np.zeros(world.dim_c)
             goal_color = np.zeros(world.dim_c)
         else:
             key = world.agents[2].key
 
-        prnt = False#True  if train use False
         # speaker
         if agent.speaker:
-            if prnt:
-                print('speaker')
-                print(agent.state.c)
-                print(np.concatenate([goal_color] + [key] + [confer] + [np.random.randn(1)]))
             return np.concatenate([goal_color] + [key])
         # listener
         if not agent.speaker and not agent.adversary:
-            if prnt:
-                print('listener')
-                print(agent.state.c)
-                print(np.concatenate([key] + comm + [confer]))
             return np.concatenate([key] + comm)
         if not agent.speaker and agent.adversary:
-            if prnt:
-                print('adversary')
-                print(agent.state.c)
-                print(np.concatenate(comm + [confer]))
             return np.concatenate(comm)

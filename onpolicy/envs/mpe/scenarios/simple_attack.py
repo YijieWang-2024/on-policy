@@ -44,12 +44,12 @@ class Scenario(BaseScenario):
         # random properties for landmarks
         # set random initial states
         for agent in world.agents:
-            agent.state.p_pos = np.random.uniform(-1, +1, world.dim_p)
+            agent.state.p_pos = world.np_random.uniform(-1, +1, world.dim_p)
             agent.state.p_vel = np.zeros(world.dim_p)
             #agent.state.c = np.zeros(world.dim_c)
         for i, landmark in enumerate(world.landmarks):
             if not landmark.boundary:
-                landmark.state.p_pos = 0.8 * np.random.uniform(-1, +1, world.dim_p)
+                landmark.state.p_pos = 0.8 * world.np_random.uniform(-1, +1, world.dim_p)
                 landmark.state.p_vel = np.zeros(world.dim_p)
                 world.agents[i].goal = landmark
 
@@ -87,6 +87,7 @@ class Scenario(BaseScenario):
         return main_reward
 
     # agents are penalized for exiting the screen, so that they can be caught by the adversaries
+    @staticmethod
     def bound(x):
         if x < 0.9:
             return 0
@@ -116,7 +117,7 @@ class Scenario(BaseScenario):
 
         for p in range(world.dim_p):
             x = abs(agent.state.p_pos[p])
-            rew -= bound(x)
+            rew -= self.bound(x)
 
         return rew
 
@@ -141,7 +142,7 @@ class Scenario(BaseScenario):
         
         for p in range(world.dim_p):
             x = abs(agent.state.p_pos[p])
-            rew -= bound(x)
+            rew -= self.bound(x)
 
         return rew
 

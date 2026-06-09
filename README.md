@@ -8,6 +8,9 @@ This is a slimmed-down copy of `marlbenchmark/on-policy` focused on:
 
 StarCraft/SMAC, Hanabi, Google Research Football, HAPPO, and HATRPO code has been removed.
 
+The MPE stack uses Gymnasium and NumPy 2. MPE time limits are represented as
+`truncated=True`; true task-ending conditions use `terminated=True`.
+
 ## Installation
 
 ```bash
@@ -55,6 +58,37 @@ python -m onpolicy.scripts.train.train_mpe \
 In this codebase, `--use_wandb` is a legacy inverse switch: adding it disables wandb and writes TensorBoard logs locally.
 
 Example shell scripts for MPE live in `onpolicy/scripts/train_mpe_scripts`.
+
+## Termination Semantics
+
+Vector environments automatically reset completed MPE episodes. The reset
+observation is returned for the next rollout step, while the actual last
+observation is retained in `info["final_observation"]`.
+
+The return calculation deliberately uses two masks:
+
+- `masks`: zero after either termination or truncation, resetting recurrent
+  state and preventing GAE from crossing into the next episode.
+- `bootstrap_masks`: zero only after termination, so truncations bootstrap from
+  the critic value of `final_observation`.
+
+This follows Gymnasium's time-limit handling and avoids treating a fixed
+rollout horizon as a terminal state.
+
+PPO training logs `approx_kl`, `clip_fraction`, and `explained_variance`.
+Set `--target_kl <value>` to optionally stop PPO epochs early when an update
+moves too far from the rollout policy; it is disabled by default.
+
+For a new MPE-like environment, return `truncated=True` when an external step
+limit causes a reset and `terminated=True` only when the task reaches a true
+terminal state. If a finite horizon is itself part of the task, expose the
+remaining time in the observation and treat the horizon as termination instead.
+
+Run the focused migration tests with:
+
+```bash
+conda run -n marl python -m unittest discover -s tests -v
+```
 
 ## Citation
 

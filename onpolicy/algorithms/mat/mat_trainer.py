@@ -30,6 +30,7 @@ class MATTrainer:
         self.data_chunk_length = args.data_chunk_length
         self.value_loss_coef = args.value_loss_coef
         self.entropy_coef = args.entropy_coef
+        self.target_kl = args.target_kl
         self.max_grad_norm = args.max_grad_norm       
         self.huber_delta = args.huber_delta
 
@@ -180,8 +181,13 @@ class MATTrainer:
         train_info['actor_grad_norm'] = 0
         train_info['critic_grad_norm'] = 0
         train_info['ratio'] = 0
+        train_info['approx_kl'] = 0
+        train_info['clip_fraction'] = 0
 
+        num_updates = 0
         for _ in range(self.ppo_epoch):
+            epoch_approx_kl = 0
+            epoch_updates = 0
             data_generator = buffer.feed_forward_generator_transformer(advantages, self.num_mini_batch)
 
             for sample in data_generator:
@@ -194,12 +200,43 @@ class MATTrainer:
                 train_info['dist_entropy'] += dist_entropy.item()
                 train_info['actor_grad_norm'] += actor_grad_norm
                 train_info['critic_grad_norm'] += critic_grad_norm
-                train_info['ratio'] += imp_weights.mean()
+                train_info['ratio'] += imp_weights.mean().item()
+                approx_kl = (
+                    imp_weights
+                    - 1
+                    - torch.log(imp_weights.clamp_min(1e-8))
+                ).mean().item()
+                train_info['approx_kl'] += approx_kl
+                train_info['clip_fraction'] += (
+                    (torch.abs(imp_weights - 1) > self.clip_param)
+                    .float()
+                    .mean()
+                    .item()
+                )
+                epoch_approx_kl += approx_kl
+                epoch_updates += 1
+                num_updates += 1
 
-        num_updates = self.ppo_epoch * self.num_mini_batch
+            if (
+                self.target_kl is not None
+                and epoch_updates > 0
+                and epoch_approx_kl / epoch_updates > self.target_kl
+            ):
+                break
 
         for k in train_info.keys():
             train_info[k] /= num_updates
+        if self._use_valuenorm:
+            values = self.value_normalizer.denormalize(buffer.value_preds[:-1])
+        else:
+            values = buffer.value_preds[:-1]
+        returns = buffer.returns[:-1]
+        return_variance = np.var(returns)
+        train_info["explained_variance"] = (
+            np.nan
+            if return_variance == 0
+            else 1 - np.var(returns - values) / return_variance
+        )
  
         return train_info
 

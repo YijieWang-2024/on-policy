@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import sys
 import os
+import random
 import wandb
 import socket
 import setproctitle
@@ -23,7 +24,6 @@ def make_render_env(all_args):
                 print("Can not support the " +
                       all_args.env_name + "environment.")
                 raise NotImplementedError
-            env.seed(all_args.seed + rank * 1000)
             return env
         return init_env
     if all_args.n_rollout_threads == 1:
@@ -56,8 +56,10 @@ def main(args):
         all_args.use_recurrent_policy = False 
         all_args.use_naive_recurrent_policy = False
     elif all_args.algorithm_name == "ippo":
-        print("u are choosing to use ippo, we set use_centralized_V to be False")
+        print("u are choosing to use ippo, we set use_centralized_V and recurrent policies to be False")
         all_args.use_centralized_V = False
+        all_args.use_recurrent_policy = False
+        all_args.use_naive_recurrent_policy = False
     elif all_args.algorithm_name in ("mat", "mat_dec"):
         print(f"u are choosing to use {all_args.algorithm_name}")
     else:
@@ -107,6 +109,7 @@ def main(args):
     torch.manual_seed(all_args.seed)
     torch.cuda.manual_seed_all(all_args.seed)
     np.random.seed(all_args.seed)
+    random.seed(all_args.seed)
 
     # env init
     envs = make_render_env(all_args)

@@ -112,6 +112,7 @@ class Agent(Entity):
 # multi-agent world
 class World(object):
     def __init__(self):
+        self.np_random = np.random.default_rng()
         # list of agents and entities (can change at execution-time!)
         self.agents = []
         self.landmarks = []
@@ -230,8 +231,8 @@ class World(object):
         # set applied forces
         for i, agent in enumerate(self.agents):
             if agent.movable:
-                noise = np.random.randn(
-                    *agent.action.u.shape) * agent.u_noise if agent.u_noise else 0.0
+                noise = self.np_random.standard_normal(
+                    agent.action.u.shape) * agent.u_noise if agent.u_noise else 0.0
                 # force = mass * a * action + n
                 p_force[i] = (
                     agent.mass * agent.accel if agent.accel is not None else agent.mass) * agent.action.u + noise
@@ -282,7 +283,7 @@ class World(object):
         if agent.silent:
             agent.state.c = np.zeros(self.dim_c)
         else:
-            noise = np.random.randn(*agent.action.c.shape) * \
+            noise = self.np_random.standard_normal(agent.action.c.shape) * \
                 agent.c_noise if agent.c_noise else 0.0
             agent.state.c = agent.action.c + noise
 
