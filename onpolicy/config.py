@@ -9,7 +9,7 @@ def get_config():
 
     Prepare parameters:
         --algorithm_name <algorithm_name>
-            specifiy the algorithm, including `["rmappo", "mappo", "rmappg", "mappg", "trpo"]`
+            specify the algorithm, including `["rmappo", "mappo", "ippo", "mat", "mat_dec"]`
         --experiment_name <str>
             an identifier to distinguish different experiment.
         --seed <int>
@@ -158,7 +158,7 @@ def get_config():
 
     # prepare parameters
     parser.add_argument("--algorithm_name", type=str,
-                        default='mappo', choices=["rmappo", "mappo", "happo", "hatrpo", "mat", "mat_dec"])
+                        default='mappo', choices=["rmappo", "mappo", "ippo", "mat", "mat_dec"])
 
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.")
     parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch")
@@ -179,7 +179,7 @@ def get_config():
     parser.add_argument("--use_wandb", action='store_false', default=True, help="[for wandb usage], by default True, will log date to wandb server. or else will use tensorboard to log data.")
 
     # env parameters
-    parser.add_argument("--env_name", type=str, default='StarCraft2', help="specify the name of environment")
+    parser.add_argument("--env_name", type=str, default='MPE', choices=["MPE"], help="specify the name of environment")
     parser.add_argument("--use_obs_instead_of_state", action='store_true',
                         default=False, help="Whether to use global state or concatenated obs")
 
@@ -228,14 +228,6 @@ def get_config():
     parser.add_argument("--opti_eps", type=float, default=1e-5,
                         help='RMSprop optimizer epsilon (default: 1e-5)')
     parser.add_argument("--weight_decay", type=float, default=0)
-
-    # trpo parameters
-    parser.add_argument("--kl_threshold", type=float, 
-                        default=0.01, help='the threshold of kl-divergence (default: 0.01)')
-    parser.add_argument("--ls_step", type=int, 
-                        default=10, help='number of line search (default: 10)')
-    parser.add_argument("--accept_ratio", type=float, 
-                        default=0.5, help='accept ratio of loss improve (default: 0.5)')
 
     # ppo parameters
     parser.add_argument("--ppo_epoch", type=int, default=15,

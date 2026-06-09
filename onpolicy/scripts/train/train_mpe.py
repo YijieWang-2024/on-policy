@@ -76,6 +76,8 @@ def main(args):
     elif all_args.algorithm_name == "ippo":
         print("u are choosing to use ippo, we set use_centralized_V to be False")
         all_args.use_centralized_V = False
+    elif all_args.algorithm_name in ("mat", "mat_dec"):
+        print(f"u are choosing to use {all_args.algorithm_name}")
     else:
         raise NotImplementedError
 
