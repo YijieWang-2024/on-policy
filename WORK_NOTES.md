@@ -1,5 +1,47 @@
 # Work Notes
 
+## 2026-06-10 - Replay buffer indexing and sampling corrections
+
+### Summary
+
+Audited the shared and separated replay buffers after the Gymnasium migration
+and corrected several indexing and sampling issues that could misalign rollout
+transitions, omit training samples, or form invalid recurrent sequences.
+
+### Key changes
+
+- Standardized replay buffer indexing so transition data is stored at time
+  `t`, while observations, recurrent states, and masks for the resulting state
+  are stored at `t + 1`.
+- Corrected return calculation to use each transition's actual next-value
+  prediction and the mask belonging to its next state.
+- Populated shared-buffer advantages for non-GAE return calculation.
+- Changed feed-forward mini-batch sampling so remainder samples are retained
+  instead of silently dropped.
+- Added divisibility and size checks for naive-recurrent and recurrent
+  mini-batches.
+- Prevented recurrent chunks from crossing agent or environment trajectory
+  boundaries.
+- Corrected separated recurrent batches to flatten in time-major order expected
+  by the recurrent layer.
+- Removed the obsolete sequential-agent factor update path from the separated
+  runner and added visible average-reward logging.
+- Added focused regression tests for buffer insertion, return calculation,
+  remainder sampling, recurrent ordering, and chunk-boundary validation.
+
+### Verification
+
+Executed successfully on 2026-06-10:
+
+```bash
+conda run -n marl python -m unittest discover -s tests -v
+conda run -n marl python -m compileall -q onpolicy tests
+git diff --check
+```
+
+All 10 tests passed, including the 5 new replay-buffer indexing and sampling
+regression tests and the existing 5 Gymnasium migration tests.
+
 ## 2026-06-10 - MPE Gymnasium migration and rollout semantics
 
 ### Summary

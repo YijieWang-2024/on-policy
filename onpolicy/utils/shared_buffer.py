@@ -102,7 +102,7 @@ class SharedReplayBuffer(object):
         :param action_log_probs:(np.ndarray) log probs of actions taken by agents
         :param value_preds: (np.ndarray) value function prediction at each step.
         :param rewards: (np.ndarray) reward collected at each step.
-        :param masks: (np.ndarray) denotes whether the environment has terminated or not.
+        :param masks: zero after either a termination or truncation boundary.
         :param next_value_preds: value predictions for the actual next observations.
         :param bootstrap_masks: zero only for true terminations; one for truncations.
         :param active_masks: (np.ndarray) denotes whether an agent is active or dead in the env.
@@ -167,6 +167,7 @@ class SharedReplayBuffer(object):
                 self.returns[step] = gae + value
         else:
             for step in reversed(range(self.rewards.shape[0])):
+                value = denormalize(self.value_preds[step])
                 next_value = denormalize(self.next_value_preds[step])
                 if step == self.rewards.shape[0] - 1:
                     next_return = next_value
@@ -179,6 +180,7 @@ class SharedReplayBuffer(object):
                     self.rewards[step]
                     + self.gamma * self.bootstrap_masks[step] * next_return
                 )
+                self.advantages[step] = self.returns[step] - value
 
     def feed_forward_generator_transformer(self, advantages, num_mini_batch=None, mini_batch_size=None):
         """
@@ -190,6 +192,7 @@ class SharedReplayBuffer(object):
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
         batch_size = n_rollout_threads * episode_length
 
+        rand = torch.randperm(batch_size).numpy()
         if mini_batch_size is None:
             assert batch_size >= num_mini_batch, (
                 "PPO requires the number of processes ({}) "
@@ -198,10 +201,13 @@ class SharedReplayBuffer(object):
                 "".format(n_rollout_threads, episode_length,
                           n_rollout_threads * episode_length,
                           num_mini_batch))
-            mini_batch_size = batch_size // num_mini_batch
-
-        rand = torch.randperm(batch_size).numpy()
-        sampler = [rand[i * mini_batch_size:(i + 1) * mini_batch_size] for i in range(num_mini_batch)]
+            sampler = np.array_split(rand, num_mini_batch)
+        else:
+            assert mini_batch_size > 0, "mini_batch_size must be positive."
+            sampler = [
+                rand[start:start + mini_batch_size]
+                for start in range(0, batch_size, mini_batch_size)
+            ]
         rows, cols = _shuffle_agent_grid(batch_size, num_agents)
 
         # keep (num_agent, dim)
@@ -266,6 +272,7 @@ class SharedReplayBuffer(object):
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
         batch_size = n_rollout_threads * episode_length * num_agents
 
+        rand = torch.randperm(batch_size).numpy()
         if mini_batch_size is None:
             assert batch_size >= num_mini_batch, (
                 "PPO requires the number of processes ({}) "
@@ -274,10 +281,13 @@ class SharedReplayBuffer(object):
                 "".format(n_rollout_threads, episode_length, num_agents,
                           n_rollout_threads * episode_length * num_agents,
                           num_mini_batch))
-            mini_batch_size = batch_size // num_mini_batch
-
-        rand = torch.randperm(batch_size).numpy()
-        sampler = [rand[i * mini_batch_size:(i + 1) * mini_batch_size] for i in range(num_mini_batch)]
+            sampler = np.array_split(rand, num_mini_batch)
+        else:
+            assert mini_batch_size > 0, "mini_batch_size must be positive."
+            sampler = [
+                rand[start:start + mini_batch_size]
+                for start in range(0, batch_size, mini_batch_size)
+            ]
 
         share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[3:])
         obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
@@ -330,6 +340,10 @@ class SharedReplayBuffer(object):
             "PPO requires the number of processes ({})* number of agents ({}) "
             "to be greater than or equal to the number of "
             "PPO mini batches ({}).".format(n_rollout_threads, num_agents, num_mini_batch))
+        assert batch_size % num_mini_batch == 0, (
+            "Naive recurrent PPO requires rollout threads * agents "
+            "to be divisible by num_mini_batch."
+        )
         num_envs_per_batch = batch_size // num_mini_batch
         perm = torch.randperm(batch_size).numpy()
 
@@ -423,8 +437,19 @@ class SharedReplayBuffer(object):
         :param data_chunk_length: (int) length of sequence chunks with which to train RNN.
         """
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
+        assert episode_length % data_chunk_length == 0, (
+            "Recurrent PPO requires episode_length to be divisible by "
+            "data_chunk_length so chunks never cross agent or environment boundaries."
+        )
         batch_size = n_rollout_threads * episode_length * num_agents
         data_chunks = batch_size // data_chunk_length  # [C=r*T*M/L]
+        assert data_chunks >= num_mini_batch, (
+            "Recurrent PPO requires at least one data chunk per mini batch."
+        )
+        assert data_chunks % num_mini_batch == 0, (
+            "Recurrent PPO requires the number of data chunks to be divisible "
+            "by num_mini_batch."
+        )
         mini_batch_size = data_chunks // num_mini_batch
 
         rand = torch.randperm(data_chunks).numpy()

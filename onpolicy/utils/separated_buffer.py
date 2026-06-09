@@ -1,7 +1,6 @@
 import torch
 import numpy as np
-from collections import defaultdict
-from .util import check, get_shape_from_obs_space, get_shape_from_act_space
+from .util import get_shape_from_obs_space, get_shape_from_act_space
 
 def _flatten(T, N, x):
     return x.reshape(T * N, *x.shape[2:])
@@ -55,12 +54,7 @@ class SeparatedReplayBuffer(object):
         self.bootstrap_masks = np.ones((self.episode_length, self.n_rollout_threads, 1), dtype=np.float32)
         self.active_masks = np.ones_like(self.masks)
 
-        self.factor = None
-
         self.step = 0
-
-    def update_factor(self, factor):
-        self.factor = factor.copy()
 
     def insert(self, share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs,
                value_preds, next_value_preds, rewards, masks, bootstrap_masks,
@@ -139,6 +133,7 @@ class SeparatedReplayBuffer(object):
         episode_length, n_rollout_threads = self.rewards.shape[0:2]
         batch_size = n_rollout_threads * episode_length
 
+        rand = torch.randperm(batch_size).numpy()
         if mini_batch_size is None:
             assert batch_size >= num_mini_batch, (
                 "PPO requires the number of processes ({}) "
@@ -146,10 +141,13 @@ class SeparatedReplayBuffer(object):
                 "to be greater than or equal to the number of PPO mini batches ({})."
                 "".format(n_rollout_threads, episode_length, n_rollout_threads * episode_length,
                           num_mini_batch))
-            mini_batch_size = batch_size // num_mini_batch
-
-        rand = torch.randperm(batch_size).numpy()
-        sampler = [rand[i*mini_batch_size:(i+1)*mini_batch_size] for i in range(num_mini_batch)]
+            sampler = np.array_split(rand, num_mini_batch)
+        else:
+            assert mini_batch_size > 0, "mini_batch_size must be positive."
+            sampler = [
+                rand[start:start + mini_batch_size]
+                for start in range(0, batch_size, mini_batch_size)
+            ]
 
         share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[2:])
         obs = self.obs[:-1].reshape(-1, *self.obs.shape[2:])
@@ -163,9 +161,6 @@ class SeparatedReplayBuffer(object):
         masks = self.masks[:-1].reshape(-1, 1)
         active_masks = self.active_masks[:-1].reshape(-1, 1)
         action_log_probs = self.action_log_probs.reshape(-1, self.action_log_probs.shape[-1])
-        if self.factor is not None:
-            # factor = self.factor.reshape(-1,1)
-            factor = self.factor.reshape(-1, self.factor.shape[-1])
         advantages = advantages.reshape(-1, 1)
 
         for indices in sampler:
@@ -189,11 +184,7 @@ class SeparatedReplayBuffer(object):
             else:
                 adv_targ = advantages[indices]
 
-            if self.factor is None:
-                yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
-            else:
-                factor_batch = factor[indices]
-                yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch, factor_batch
+            yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
 
     def naive_recurrent_generator(self, advantages, num_mini_batch):
         n_rollout_threads = self.rewards.shape[1]
@@ -201,6 +192,10 @@ class SeparatedReplayBuffer(object):
             "PPO requires the number of processes ({}) "
             "to be greater than or equal to the number of "
             "PPO mini batches ({}).".format(n_rollout_threads, num_mini_batch))
+        assert n_rollout_threads % num_mini_batch == 0, (
+            "Naive recurrent PPO requires n_rollout_threads to be divisible "
+            "by num_mini_batch."
+        )
         num_envs_per_batch = n_rollout_threads // num_mini_batch
         perm = torch.randperm(n_rollout_threads).numpy()
         for start_ind in range(0, n_rollout_threads, num_envs_per_batch):
@@ -216,7 +211,6 @@ class SeparatedReplayBuffer(object):
             active_masks_batch = []
             old_action_log_probs_batch = []
             adv_targ = []
-            factor_batch = []
             for offset in range(num_envs_per_batch):
                 ind = perm[start_ind + offset]
                 share_obs_batch.append(self.share_obs[:-1, ind])
@@ -232,8 +226,6 @@ class SeparatedReplayBuffer(object):
                 active_masks_batch.append(self.active_masks[:-1, ind])
                 old_action_log_probs_batch.append(self.action_log_probs[:, ind])
                 adv_targ.append(advantages[:, ind])
-                if self.factor is not None:
-                    factor_batch.append(self.factor[:,ind])
 
             # [N[T, dim]]
             T, N = self.episode_length, num_envs_per_batch
@@ -243,8 +235,6 @@ class SeparatedReplayBuffer(object):
             actions_batch = np.stack(actions_batch, 1)
             if self.available_actions is not None:
                 available_actions_batch = np.stack(available_actions_batch, 1)
-            if self.factor is not None:
-                factor_batch=np.stack(factor_batch,1)
             value_preds_batch = np.stack(value_preds_batch, 1)
             return_batch = np.stack(return_batch, 1)
             masks_batch = np.stack(masks_batch, 1)
@@ -264,31 +254,35 @@ class SeparatedReplayBuffer(object):
                 available_actions_batch = _flatten(T, N, available_actions_batch)
             else:
                 available_actions_batch = None
-            if self.factor is not None:
-                factor_batch=_flatten(T,N,factor_batch)
             value_preds_batch = _flatten(T, N, value_preds_batch)
             return_batch = _flatten(T, N, return_batch)
             masks_batch = _flatten(T, N, masks_batch)
             active_masks_batch = _flatten(T, N, active_masks_batch)
             old_action_log_probs_batch = _flatten(T, N, old_action_log_probs_batch)
             adv_targ = _flatten(T, N, adv_targ)
-            if self.factor is not None:
-                yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch, factor_batch
-            else:
-                yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
+            yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
 
     def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):
         episode_length, n_rollout_threads = self.rewards.shape[0:2]
+        assert episode_length % data_chunk_length == 0, (
+            "Recurrent PPO requires episode_length to be divisible by "
+            "data_chunk_length so chunks never cross environment boundaries."
+        )
         batch_size = n_rollout_threads * episode_length
         data_chunks = batch_size // data_chunk_length  # [C=r*T/L]
+        assert data_chunks >= num_mini_batch, (
+            "Recurrent PPO requires at least one data chunk per mini batch."
+        )
+        assert data_chunks % num_mini_batch == 0, (
+            "Recurrent PPO requires the number of data chunks to be divisible "
+            "by num_mini_batch."
+        )
         mini_batch_size = data_chunks // num_mini_batch
 
         assert episode_length * n_rollout_threads >= data_chunk_length, (
             "PPO requires the number of processes ({}) * episode length ({}) "
             "to be greater than or equal to the number of "
             "data chunk length ({}).".format(n_rollout_threads, episode_length, data_chunk_length))
-        assert data_chunks >= 2, ("need larger batch size")
-
         rand = torch.randperm(data_chunks).numpy()
         sampler = [rand[i*mini_batch_size:(i+1)*mini_batch_size] for i in range(num_mini_batch)]
 
@@ -306,8 +300,6 @@ class SeparatedReplayBuffer(object):
         returns = _cast(self.returns[:-1])
         masks = _cast(self.masks[:-1])
         active_masks = _cast(self.active_masks[:-1])
-        if self.factor is not None:
-            factor = _cast(self.factor)
         # rnn_states = _cast(self.rnn_states[:-1])
         # rnn_states_critic = _cast(self.rnn_states_critic[:-1])
         rnn_states = self.rnn_states[:-1].transpose(1, 0, 2, 3).reshape(-1, *self.rnn_states.shape[2:])
@@ -329,7 +321,6 @@ class SeparatedReplayBuffer(object):
             active_masks_batch = []
             old_action_log_probs_batch = []
             adv_targ = []
-            factor_batch = []
             for index in indices:
                 ind = index * data_chunk_length
                 # size [T+1 N M Dim]-->[T N Dim]-->[N T Dim]-->[T*N,Dim]-->[L,Dim]
@@ -347,25 +338,21 @@ class SeparatedReplayBuffer(object):
                 # size [T+1 N Dim]-->[T N Dim]-->[T*N,Dim]-->[1,Dim]
                 rnn_states_batch.append(rnn_states[ind])
                 rnn_states_critic_batch.append(rnn_states_critic[ind])
-                if self.factor is not None:
-                    factor_batch.append(factor[ind:ind+data_chunk_length])
             L, N = data_chunk_length, mini_batch_size
 
-            # These are all from_numpys of size (N, L, Dim)
-            share_obs_batch = np.stack(share_obs_batch)
-            obs_batch = np.stack(obs_batch)
+            # RNNLayer expects flattened (L, N, ...), not (N, L, ...).
+            share_obs_batch = np.stack(share_obs_batch, axis=1)
+            obs_batch = np.stack(obs_batch, axis=1)
 
-            actions_batch = np.stack(actions_batch)
+            actions_batch = np.stack(actions_batch, axis=1)
             if self.available_actions is not None:
-                available_actions_batch = np.stack(available_actions_batch)
-            if self.factor is not None:
-                factor_batch = np.stack(factor_batch)
-            value_preds_batch = np.stack(value_preds_batch)
-            return_batch = np.stack(return_batch)
-            masks_batch = np.stack(masks_batch)
-            active_masks_batch = np.stack(active_masks_batch)
-            old_action_log_probs_batch = np.stack(old_action_log_probs_batch)
-            adv_targ = np.stack(adv_targ)
+                available_actions_batch = np.stack(available_actions_batch, axis=1)
+            value_preds_batch = np.stack(value_preds_batch, axis=1)
+            return_batch = np.stack(return_batch, axis=1)
+            masks_batch = np.stack(masks_batch, axis=1)
+            active_masks_batch = np.stack(active_masks_batch, axis=1)
+            old_action_log_probs_batch = np.stack(old_action_log_probs_batch, axis=1)
+            adv_targ = np.stack(adv_targ, axis=1)
 
             # States is just a (N, -1) from_numpy
             rnn_states_batch = np.stack(rnn_states_batch).reshape(N, *self.rnn_states.shape[2:])
@@ -379,15 +366,10 @@ class SeparatedReplayBuffer(object):
                 available_actions_batch = _flatten(L, N, available_actions_batch)
             else:
                 available_actions_batch = None
-            if self.factor is not None:
-                factor_batch = _flatten(L, N, factor_batch)
             value_preds_batch = _flatten(L, N, value_preds_batch)
             return_batch = _flatten(L, N, return_batch)
             masks_batch = _flatten(L, N, masks_batch)
             active_masks_batch = _flatten(L, N, active_masks_batch)
             old_action_log_probs_batch = _flatten(L, N, old_action_log_probs_batch)
             adv_targ = _flatten(L, N, adv_targ)
-            if self.factor is not None:
-                yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch, factor_batch
-            else:
-                yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
+            yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch

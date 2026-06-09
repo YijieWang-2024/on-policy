@@ -105,6 +105,10 @@ class MPERunner(Runner):
                     train_infos[agent_id]["average_episode_rewards"] = (
                         np.mean(self.buffer[agent_id].rewards) * self.episode_length
                     )
+                    print(
+                        f"average episode rewards of agent{agent_id} is "
+                        f"{train_infos[agent_id]['average_episode_rewards']}"
+                    )
                 self.log_train(train_infos, total_num_steps)
 
             if episode % self.eval_interval == 0 and self.use_eval:
