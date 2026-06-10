@@ -1,5 +1,35 @@
 # Work Notes
 
+## 2026-06-10 - MPE rendering setup corrections
+
+### Summary
+
+Improved the retained MPE rendering path so shared-policy rendering initializes
+its output directory correctly and reports dependency or OpenGL setup failures
+clearly.
+
+### Key changes
+
+- Initialized the shared runner's render-mode `run_dir` and `gifs` directory
+  without depending on training or Weights & Biases setup.
+- Added the compatible `pyglet>=1.5,<2` rendering dependency explicitly.
+- Replaced invalid fallback print calls during rendering imports with actionable
+  exceptions for missing pyglet and unavailable OpenGL.
+
+### Verification
+
+Executed successfully on 2026-06-10:
+
+```bash
+conda run -n marl python -m unittest discover -s tests -v
+conda run -n marl python -m compileall -q onpolicy tests
+conda run -n marl python -c "import pyglet; print(pyglet.version)"
+git diff --check
+```
+
+All 10 tests passed. The active `marl` environment reports pyglet version
+`1.5.31`, which satisfies the pinned compatibility range.
+
 ## 2026-06-10 - Replay buffer indexing and sampling corrections
 
 ### Summary
