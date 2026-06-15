@@ -1,5 +1,45 @@
 # Work Notes
 
+## 2026-06-15 - MEC environment port, testing, and checkpoint config
+
+### Summary
+
+Integrated the current MEC implementation into the on-policy project, improved
+the test entrypoint, and made saved model directories carry enough run
+configuration for later evaluation or rendering.
+
+### Key changes
+
+- Added the MEC finite-fleet environment, scenario configuration, metrics,
+  shared runner, policy wrapper, and train/eval/render entrypoints.
+- Documented the MEC porting assumptions and expanded `README.md` with the
+  unified pytest command for the active `marl` environment.
+- Added `pytest` to project requirements.
+- Removed the local absolute path dependency from the MEC parity test by using
+  `MFMEC_ORIGIN_SRC`; the parity test is skipped when the reference source is
+  unavailable.
+- Saved `config.json` beside each run and under `models/`, then taught MEC
+  eval/render scripts to load saved arguments unless the user explicitly
+  overrides them on the command line.
+
+### Verification
+
+Executed successfully on 2026-06-15:
+
+```bash
+/opt/anaconda3/envs/marl/bin/python -m compileall -q onpolicy tests
+/opt/anaconda3/envs/marl/bin/python -m pytest tests onpolicy/envs/mec/tests onpolicy/algorithms/mec/tests -q
+MFMEC_ORIGIN_SRC="/Users/qiaonan/Projects/Mean Field Mec/src" /opt/anaconda3/envs/marl/bin/python -m pytest onpolicy/envs/mec/tests/test_finite_k_env.py -q
+/opt/anaconda3/envs/marl/bin/python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo --experiment_name config_smoke --mec_fleet_size 2 --n_rollout_threads 1 --episode_length 2 --num_env_steps 2 --ppo_epoch 1 --num_mini_batch 1 --hidden_size 8 --layer_N 1 --use_wandb
+/opt/anaconda3/envs/marl/bin/python -m onpolicy.scripts.render.render_mec --model_dir /Users/qiaonan/Projects/on-policy/onpolicy/scripts/results/MEC/v2_iort_6km_mmwave/mappo/config_smoke/run1/models --episode_len 1 --out /tmp/mec_config_smoke.gif
+/opt/anaconda3/envs/marl/bin/python -m onpolicy.scripts.eval.eval_mec --env_name MEC --mec_eval_controller policy --model_dir /Users/qiaonan/Projects/on-policy/onpolicy/scripts/results/MEC/v2_iort_6km_mmwave/mappo/config_smoke/run1/models --mec_eval_episodes 1
+/opt/anaconda3/envs/marl/bin/python -m onpolicy.scripts.render.render_mec --model_dir /Users/qiaonan/Projects/on-policy/onpolicy/scripts/results/MEC/v2_iort_6km_mmwave/mappo/v2_run1/run2/models --hidden_size 128 --layer_N 2 --episode_len 1 --out /tmp/mec_legacy_config_smoke.gif
+git diff --check
+```
+
+The unified pytest run reported `26 passed, 1 skipped, 2 warnings, 20 subtests
+passed`. The skip is expected when `MFMEC_ORIGIN_SRC` is not provided.
+
 ## 2026-06-10 - MPE rendering setup corrections
 
 ### Summary

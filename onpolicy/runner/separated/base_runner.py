@@ -5,6 +5,7 @@ import torch
 from tensorboardX import SummaryWriter
 
 from onpolicy.utils.separated_buffer import SeparatedReplayBuffer
+from onpolicy.utils.run_config import save_run_config
 
 class Runner(object):
     def __init__(self, config):
@@ -59,6 +60,13 @@ class Runner(object):
                 if not os.path.exists(self.save_dir):
                     os.makedirs(self.save_dir)
 
+        if not self.use_render:
+            save_run_config(
+                self.all_args,
+                self.run_dir,
+                self.save_dir,
+                num_agents=self.num_agents,
+            )
 
         from onpolicy.algorithms.r_mappo.r_mappo import R_MAPPO as TrainAlgo
         from onpolicy.algorithms.r_mappo.algorithm.rMAPPOPolicy import R_MAPPOPolicy as Policy

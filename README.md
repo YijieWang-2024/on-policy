@@ -154,6 +154,16 @@ TensorBoard 日志。
 onpolicy/scripts/results/MPE/<scenario>/<algorithm>/<experiment>/runN/models/
 ```
 
+每个 run 会同时保存训练配置：
+
+```text
+onpolicy/scripts/results/<env>/<scenario>/<algorithm>/<experiment>/runN/config.json
+onpolicy/scripts/results/<env>/<scenario>/<algorithm>/<experiment>/runN/models/config.json
+```
+
+该配置记录 `algorithm_name`、环境参数、网络结构、PPO 超参数、随机种子等
+`all_args` 字段，用于后续评估和渲染复现实验。
+
 ## 与原始库的训练对比
 
 下图使用上面的同一条训练命令，分别运行原始 `marlbenchmark/on-policy` 与本项目，
@@ -193,12 +203,18 @@ GIF 默认保存在：
 onpolicy/scripts/results/MPE/<scenario>/<algorithm>/<experiment>/runN/gifs/render.gif
 ```
 
-加载 checkpoint 时，环境参数和网络结构参数必须与训练时保持一致。
+加载 checkpoint 时，环境参数和网络结构参数必须与训练时保持一致。新的 run 会在
+`models/config.json` 保存这些参数；MEC 的评估和渲染脚本会在传入 `--model_dir`
+时自动读取该配置。命令行中显式传入的参数仍会覆盖保存配置。
 
 ## 测试
 
 ```bash
-conda run -n marl python -m unittest discover -s tests -v
+conda run -n marl python -m pytest \
+  tests \
+  onpolicy/envs/mec/tests \
+  onpolicy/algorithms/mec/tests \
+  -q
 ```
 
 测试覆盖：
@@ -210,6 +226,17 @@ conda run -n marl python -m unittest discover -s tests -v
 - GAE 与非 GAE return
 - shared / separated buffer 的 `t` 与 `t + 1` 索引
 - recurrent generator 的时间顺序和轨迹边界
+- MEC 场景配置推导、60GHz 回传服务半径、成本分解、随机游走需求、排列不变性
+- MEC major/minor policy 的动作形状、log-prob 一致性和梯度流
+- MEC 系统级 health check
+
+MEC 与原始 `Mean Field Mec` 仓库逐步数值一致性的 parity test 需要原仓库路径。
+默认未设置时该测试会 skip；如需运行：
+
+```bash
+MFMEC_ORIGIN_SRC="/absolute/path/to/Mean Field Mec/src" \
+  conda run -n marl python -m pytest onpolicy/envs/mec/tests/test_finite_k_env.py -q
+```
 
 ## Citation
 

@@ -10,3 +10,4 @@ tensorboardX
 setproctitle
 imageio
 pyglet>=1.5,<2
+pytest

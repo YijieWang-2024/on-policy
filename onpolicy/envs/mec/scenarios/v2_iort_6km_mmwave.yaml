@@ -1,0 +1,516 @@
+# MEC v2 锁定场景 — 单一真源(对照 docs/mec_env_port_spec.md §5)
+# 低空可动算力中枢(major, 1.5km)+ K 同构 UAV(minor, 300m)+ 漂移 IoRT demand 场
+# 接入 sub-6 2.4GHz(覆盖半径 ~861m);回传 60GHz mmWave 专波束(服务半径 ~2.2km)
+# 注:键名沿用原仓库 `hap`(= 低空算力中枢,已非高空平台),最小化移植 diff。
+schema_version: "2.0"
+name: v2_iort_6km_mmwave
+status: locked_v2
+description: >
+  Locked v2 scenario for the finite-K hierarchical aerial MEC port. 6 km x 6 km
+  IoRT region, K=24 homogeneous UAVs (minor) + one low-altitude mobile compute
+  hub at 1.5 km (major). Sub-6 GHz access (gamma_th bounds UAV coverage ~861 m),
+  60 GHz mmWave dedicated-beam backhaul (link budget bounds hub service radius
+  ~2.2 km). Random-walk drifting hotspot demand. Cost lambdas (1,3,8,0.03,0.5)
+  with src/ovf split; all omega weights are formula-derived at load time (R2).
+
+base:
+  seed:
+    value: 20260604
+    unit: none
+    source: manuscript
+    rationale: default experiment seed; final results sweep multiple seeds
+  slot_length_s:
+    value: 1.0
+    unit: s
+    source: manuscript
+    rationale: one-second slot keeps per-slot rates interpretable
+  episode_horizon_slots:
+    value: 200
+    unit: slots
+    source: manuscript
+    rationale: default rollout truncation (truncated, never terminated; D3)
+  discount_gamma:
+    value: 0.99
+    unit: none
+    source: algorithm_default
+    rationale: standard long-horizon RL discount
+
+env:
+  fleet_size_k:
+    value: 24
+    unit: UAVs
+    source: spec_v2
+    rationale: locked default; sweeps use 8/16/24/32 via loader override
+  region:
+    lx_m:
+      value: 6000.0
+      unit: m
+      source: spec_v2
+      rationale: 6 km region > 2x backhaul service radius so the hub must move
+    ly_m:
+      value: 6000.0
+      unit: m
+      source: spec_v2
+      rationale: square region
+  slot_timing:
+    service_position:
+      value: mid_move
+      unit: none
+      source: spec_v2_R5
+      rationale: serve at the midpoint of the constant-velocity slot; state advances to slot end
+  hap:  # = low-altitude mobile compute hub (major); key kept for port-diff minimization
+    altitude_m:
+      value: 1500.0
+      unit: m
+      source: spec_v2
+      rationale: low-altitude hub; horizontal motion meaningfully changes mmWave backhaul geometry
+    velocity_max_mps:
+      value: 30.0
+      unit: m/s
+      source: spec_v2
+      rationale: hub trajectory is the major action; fast enough to chase the UAV swarm
+    initial_xy_m:
+      value: [3000.0, 3000.0]
+      unit: m
+      source: spec_v2
+      rationale: centered start
+    queue_max_bits:
+      value: 150000000.0
+      unit: bits
+      source: spec_v2
+      rationale: 150 Mbit central buffer; small enough that overflow is a real risk
+    initial_queue_bits:
+      value: 0.0
+      unit: bits
+      source: spec_v2
+      rationale: empty hub queue at reset
+    cpu_frequency_hz:
+      value: 30000000000.0
+      unit: Hz
+      source: spec_v2
+      rationale: 30 GHz -> C_H = 7.5 Mbit/slot at c0=4000; system is processing-bound
+    static_power_w:
+      value: 500.0
+      unit: W
+      source: literature
+      rationale: hub electronics + station-keeping baseline (Fan-style surrogate)
+    flight_energy_model:
+      value: fan_2026_drag_power
+      unit: none
+      source: literature
+      rationale: P = P0 + v_wind^3 * psi * (v^2+eps^2)^(1/3) * C_D surrogate
+    wind_speed_mps:
+      value: 20.0
+      unit: m/s
+      source: literature
+      rationale: Fan et al. 2026 Table 3
+    air_density_kg_per_m3:
+      value: 0.53
+      unit: kg/m3
+      source: health_check_locked
+      rationale: kept identical to the v2 health-check runs (5.1); physical value at 1.5 km is ~1.06 - revisit only with a re-run of the share/ablation checks
+    drag_coefficient:
+      value: 0.05
+      unit: none
+      source: literature
+      rationale: Fan et al. 2026 Table 3
+    speed_smoothing_eps_mps:
+      value: 0.1
+      unit: m/s
+      source: engineering_default
+      rationale: smooth surrogate near zero speed
+  uav:
+    altitude_m:
+      value: 300.0
+      unit: m
+      source: literature
+      rationale: low-altitude access layer (Fan et al. 2026)
+    velocity_max_mps:
+      value: 40.0
+      unit: m/s
+      source: literature
+      rationale: rotary-wing max horizontal speed
+    queue_max_bits:
+      value: 80000000.0
+      unit: bits
+      source: spec_v2
+      rationale: 80 Mbit buffer; backlog/overflow carry real cost
+    cpu_frequency_hz:
+      value: 1000000000.0
+      unit: Hz
+      source: spec_v2
+      rationale: 1 GHz -> C_U = 0.25 Mbit/slot; weak local layer makes offloading load-bearing
+    initial_xy_m:
+      generator: grid
+      margin_frac: 0.2
+      unit: m
+      source: spec_v2
+      rationale: deterministic g x g grid over [margin, 1-margin] of the region, row-major, first K points (matches health-check deployment); regenerated for any K
+    initial_queue_bits:
+      value: 0.0
+      unit: bits
+      source: spec_v2
+      rationale: scalar broadcast to length K at load time
+
+demand:
+  device_density:
+    rho_g_devices_per_m2:
+      value: 0.001
+      unit: devices/m2
+      source: manuscript
+      rationale: ~36k devices over the 36 km^2 field
+  packet_size_bits:
+    value: 1000000.0
+    unit: bits
+    source: manuscript
+    rationale: 1 Mbit compressed sensing / task descriptor packet
+  markov_chain:  # single-state compatibility wrapper; motion governed by demand.process
+    states:
+      - random_walk_hotspot
+    initial_state:
+      value: random_walk_hotspot
+      unit: none
+      source: spec_v2
+      rationale: deterministic label; hotspot motion is the random-walk process below
+    transition_matrix:
+      value:
+        - [1.0]
+      unit: probability
+      source: spec_v2
+      rationale: one-state wrapper
+  process:
+    model:
+      value: random_walk_hotspot
+      unit: none
+      source: spec_v2
+      rationale: fixed start + per-episode random heading + per-slot noise + boundary reflection -> no pre-tunable fixed optimum across episodes
+    label:
+      value: random_walk_hotspot
+      unit: none
+      source: spec_v2
+      rationale: log/visualization label
+    initial_center_frac:
+      value: [0.2, 0.2]
+      unit: fraction_of_region
+      source: spec_v2
+      rationale: fixed start at (0.2R, 0.2R) each episode
+    speed_mps:
+      value: 25.0
+      unit: m/s
+      source: spec_v2
+      rationale: comparable to UAV mobility scale (V_U=40) so tracking is feasible but not free
+    heading:
+      value: uniform_per_episode
+      unit: none
+      source: spec_v2
+      rationale: theta ~ U[0,2pi) drawn at reset from the env rng
+    noise_std_m:
+      value: 250.0
+      unit: m
+      source: spec_v2
+      rationale: per-slot N(0,250m) jitter on the center
+    boundary:
+      value: reflect
+      unit: none
+      source: spec_v2
+      rationale: mirror position and flip velocity component at region edges
+  activity_probability:
+    model:
+      value: background_plus_drifting_gaussian_hotspot
+      unit: none
+      source: spec_v2
+      rationale: whole-field background + one broad drifting hotspot
+    base_probability:
+      value: 0.00002
+      unit: probability/slot
+      source: spec_v2
+      rationale: low background so the hotspot dominates (high contrast)
+    hotspot_peak_increment:
+      value: 0.008
+      unit: probability/slot
+      source: spec_v2
+      rationale: with sigma=800m gives offered ~33 Mbit/slot (hot ~32 + bg ~1)
+    hotspot_sigma_m:
+      value: 800.0
+      unit: m
+      source: spec_v2
+      rationale: compact hotspot; UAV coverage circle (~861 m) is the matching scale
+    clip_probability:
+      value: [0.0, 0.005]
+      unit: probability/slot
+      source: manuscript
+      rationale: preserves low-duty-cycle IoRT semantics
+    centers_by_state_m:
+      random_walk_hotspot: [1200.0, 1200.0]
+
+numerics:
+  spatial_integral:
+    method:
+      value: midpoint_grid
+      unit: none
+      source: engineering_default
+      rationale: deterministic quadrature
+    grid_shape:
+      value: [81, 81]
+      unit: grid_points
+      source: health_check_locked
+      rationale: 74 m cells over 6 km; identical to v2 health-check runs
+  eps:
+    value: 1.0e-12
+    unit: none
+    source: engineering_default
+    rationale: guards divisions and logs
+  internal_power_scale:
+    value: linear
+    unit: none
+    source: manuscript
+    rationale: linear power scale internally
+
+communication:
+  noise:
+    thermal_noise_psd_dbm_per_hz:
+      value: -174.0
+      unit: dBm/Hz
+      source: engineering_standard
+      rationale: room-temperature thermal noise density
+    receiver_noise_figure_db:
+      value: 9.0
+      unit: dB
+      source: manuscript
+      rationale: access-receiver noise figure (backhaul has its own NF below)
+  access:
+    carrier_frequency_hz:
+      value: 2400000000.0
+      unit: Hz
+      source: manuscript
+      rationale: sub-6 GHz NLoS-capable massive IoT access
+    bandwidth_allocation:
+      value: fixed_total
+      unit: none
+      source: manuscript
+      rationale: fleet sweeps keep total access bandwidth fixed (per-UAV = W/K)
+    total_bandwidth_hz:
+      value: 80000000.0
+      unit: Hz
+      source: manuscript
+      rationale: 80 MHz shared by the UAV access layer (FDMA across UAVs, OFDMA within cell)
+    user_max_power_w:
+      value: 0.1
+      unit: W
+      source: literature
+      rationale: low-power IoT uplink; fixed
+    user_target_psd_w_per_hz:
+      value: 1.0e-7
+      unit: W/Hz
+      source: derived
+      rationale: with 0.1 W cap implies B_max = 1 MHz per device
+    snr_threshold_linear:
+      value: 100.0
+      unit: linear
+      source: manuscript
+      rationale: 20 dB access-quality threshold -> UAV coverage radius ~861 m
+    smooth_service_temperature_tau:
+      value: 0.2
+      unit: none
+      source: manuscript
+      rationale: smooth logit service split with outside option
+    los_probability:
+      model: al_hourani
+      a1:
+        value: 9.61
+        unit: none
+        source: literature
+        rationale: urban A2G parameter
+      a2:
+        value: 0.16
+        unit: none
+        source: literature
+        rationale: urban A2G parameter
+    pathloss:
+      model: fspl_with_los_nlos_excess_loss
+      reference_loss_linear_at_1m:
+        value: 10106.474906715503
+        unit: linear loss
+        source: derived
+        rationale: (4*pi*fc/c)^2 at fc=2.4 GHz with c=3e8, identical to origin repo for 1:1 numeric parity on unchanged equations
+      alpha_los:
+        value: 2.0
+        unit: none
+        source: engineering_default
+        rationale: free-space exponent
+      alpha_nlos:
+        value: 2.0
+        unit: none
+        source: engineering_default
+        rationale: excess loss carried by eta, not the exponent
+      eta_los_linear:
+        value: 1.258925412
+        unit: linear loss
+        source: literature
+        rationale: 1 dB LoS excess
+      eta_nlos_linear:
+        value: 100.0
+        unit: linear loss
+        source: literature
+        rationale: 20 dB NLoS excess
+  backhaul:
+    link_model:
+      value: mmwave_beam
+      unit: none
+      source: spec_v2
+      rationale: dedicated analog beam per UAV (positions known -> aligned); spatial isolation + orthogonal sub-bands -> negligible inter-beam interference
+    mmwave:
+      carrier_frequency_hz:
+        value: 60000000000.0
+        unit: Hz
+        source: spec_v2
+        rationale: V-band; O2 absorption provides the natural service-radius cutoff
+      tx_power_dbm:
+        value: 27.0
+        unit: dBm
+        source: spec_v2
+        rationale: 0.5 W UAV mmWave front-end; fixed
+      antenna_gain_total_db:
+        value: 40.0
+        unit: dB
+        source: spec_v2
+        rationale: G_t + G_r of the aligned beam pair (~20+20 dBi)
+      kappa_o2_db_per_km:
+        value: 10.0
+        unit: dB/km
+        source: literature
+        rationale: 60 GHz oxygen absorption -> SNR collapses past ~2 km
+      noise_figure_db:
+        value: 8.0
+        unit: dB
+        source: spec_v2
+        rationale: mmWave receiver NF
+      demod_snr_min_db:
+        value: 0.0
+        unit: dB
+        source: spec_v2
+        rationale: below this the beam cannot be demodulated -> rate = 0 (outside service circle)
+      beam_bandwidth_hz:
+        value: 25000000.0
+        unit: Hz
+        source: spec_v2
+        rationale: 25 MHz per dedicated beam, fixed, K-independent (no bandwidth action; K*25 MHz << V-band capacity)
+
+compute:
+  cycles_per_bit:
+    value: 4000.0
+    unit: cycles/bit
+    source: spec_v2
+    rationale: heavy analytics (video/CV class)
+  kappa_uav:
+    value: 1.0e-28
+    unit: hardware coefficient
+    source: literature
+    rationale: DVFS energy coefficient
+  kappa_hap:
+    value: 1.0e-28
+    unit: hardware coefficient
+    source: literature
+    rationale: same order as UAV
+
+energy:
+  uav_rotary_wing:
+    p0_blade_profile_w:
+      value: 79.86
+      unit: W
+      source: literature
+      rationale: Zeng 2019 rotary-wing profile power
+    p_induced_w:
+      value: 88.63
+      unit: W
+      source: literature
+      rationale: Zeng 2019 induced power
+    u_tip_mps:
+      value: 120.0
+      unit: m/s
+      source: literature
+      rationale: rotor tip speed
+    v0_hover_mps:
+      value: 4.03
+      unit: m/s
+      source: literature
+      rationale: mean rotor induced velocity in hover
+    fuselage_drag_ratio:
+      value: 0.6
+      unit: none
+      source: literature
+      rationale: Zeng 2019
+    air_density_kg_per_m3:
+      value: 1.225
+      unit: kg/m3
+      source: literature
+      rationale: sea-level air density at UAV altitude
+    rotor_solidity:
+      value: 0.05
+      unit: none
+      source: literature
+      rationale: Zeng 2019
+    rotor_disc_area_m2:
+      value: 0.503
+      unit: m2
+      source: literature
+      rationale: Zeng 2019
+
+cost:
+  lambdas:
+    queue:
+      value: 1.0
+      unit: none
+      source: spec_v2
+      rationale: backlog weight
+    src:
+      value: 5.0
+      unit: none
+      source: spec_v2
+      rationale: source-expiry weight = lost fresh data at the source
+    ovf:
+      value: 5.0
+      unit: none
+      source: spec_v2
+      rationale: >
+        queue-overflow weight. MUST stay <= src. A long 2e6-step run with ovf>src
+        (8:3) made the trained policy DELIBERATELY under-collect to dodge overflow
+        (accepted 19.5M->5.0M, U_src 4.8M->16.9M), killing demand-matching. A lost
+        bit is a lost bit regardless of where it is lost, so src and ovf are equal.
+    energy:
+      value: 0.03
+      unit: none
+      source: spec_v2
+      rationale: energy regularizer
+    safety:
+      value: 0.5
+      unit: none
+      source: spec_v2
+      rationale: separation penalty weight
+  references:
+    loss_ref_bits_per_slot:
+      value: 100000000.0
+      unit: bits/slot
+      source: spec_v2
+      rationale: D_ref, dimensional commensuration for both src and ovf terms (R1 - part of the objective, not RL-scale normalization)
+    energy_ref_j_per_slot:
+      value: 10000.0
+      unit: J/slot
+      source: spec_v2
+      rationale: E_ref
+  safety:
+    min_uav_distance_m:
+      value: 30.0
+      unit: m
+      source: manuscript
+      rationale: soft pairwise separation penalty, permutation-invariant, /C(K,2)
+  # NOTE (R2): no omega weights here on purpose - all omegas are formula-derived
+  # at load time from lambdas + references + K-dependent capacities.
+
+normalization:
+  demand_state_encoding:
+    value: center_velocity
+    unit: none
+    source: spec_v2
+    rationale: policies observe normalized hotspot center + velocity
+  # position/queue divisors are derived at load time from region size and queue caps.
