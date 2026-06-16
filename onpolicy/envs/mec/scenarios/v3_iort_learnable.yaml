@@ -1,10 +1,11 @@
-# MEC v2 锁定场景 — 单一真源(对照 docs/mec_env_port_spec.md §5)
+# MEC v3 学习友好场景 — 由 v2 派生(K=12 + 算力x2 + 队列x1.5,使定位/​demand-matching 影响成本)
+# 派生依据见 scan_env.py 敏感度扫描;v2 仍为锁定真源
 # 低空可动算力中枢(major, 1.5km)+ K 同构 UAV(minor, 300m)+ 漂移 IoRT demand 场
 # 接入 sub-6 2.4GHz(覆盖半径 ~861m);回传 60GHz mmWave 专波束(服务半径 ~2.2km)
 # 注:键名沿用原仓库 `hap`(= 低空算力中枢,已非高空平台),最小化移植 diff。
 schema_version: "2.0"
-name: v2_iort_6km_mmwave
-status: locked_v2
+name: v3_iort_learnable
+status: v3_learnable
 description: >
   Locked v2 scenario for the finite-K hierarchical aerial MEC port. 6 km x 6 km
   IoRT region, K=24 homogeneous UAVs (minor) + one low-altitude mobile compute
@@ -38,10 +39,10 @@ base:
 
 env:
   fleet_size_k:
-    value: 24
+    value: 12
     unit: UAVs
-    source: spec_v2
-    rationale: locked default; sweeps use 8/16/24/32 via loader override
+    source: v3_learnable
+    rationale: fewer UAVs so the swarm cannot blanket the 6km field (coverage ~0.8x) and must concentrate on the hotspot -> positioning becomes load-bearing
   region:
     lx_m:
       value: 6000.0
@@ -76,20 +77,20 @@ env:
       source: spec_v2
       rationale: centered start
     queue_max_bits:
-      value: 150000000.0
+      value: 225000000.0
       unit: bits
-      source: spec_v2
-      rationale: 150 Mbit central buffer; small enough that overflow is a real risk
+      source: v3_learnable
+      rationale: 225 Mbit central buffer (x1.5); omega_Q auto-renormalizes by total capacity
     initial_queue_bits:
       value: 0.0
       unit: bits
       source: spec_v2
       rationale: empty hub queue at reset
     cpu_frequency_hz:
-      value: 30000000000.0
+      value: 60000000000.0
       unit: Hz
-      source: spec_v2
-      rationale: 30 GHz -> C_H = 7.5 Mbit/slot at c0=4000; system is processing-bound
+      source: v3_learnable
+      rationale: 60 GHz -> C_H = 15 Mbit/slot at c0=4000; moderate processing bottleneck (overload ~1.6x)
     static_power_w:
       value: 500.0
       unit: W
@@ -132,15 +133,15 @@ env:
       source: literature
       rationale: rotary-wing max horizontal speed
     queue_max_bits:
-      value: 80000000.0
+      value: 120000000.0
       unit: bits
-      source: spec_v2
-      rationale: 80 Mbit buffer; backlog/overflow carry real cost
+      source: v3_learnable
+      rationale: 120 Mbit buffer (x1.5); omega_Q auto-renormalizes by total capacity
     cpu_frequency_hz:
-      value: 1000000000.0
+      value: 2000000000.0
       unit: Hz
-      source: spec_v2
-      rationale: 1 GHz -> C_U = 0.25 Mbit/slot; weak local layer makes offloading load-bearing
+      source: v3_learnable
+      rationale: 2 GHz -> C_U = 0.5 Mbit/slot; capable modern UAV compute, offloading still load-bearing
     initial_xy_m:
       generator: grid
       margin_frac: 0.2

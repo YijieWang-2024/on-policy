@@ -240,6 +240,12 @@ def get_config():
                         help='number of batches for ppo (default: 1)')
     parser.add_argument("--entropy_coef", type=float, default=0.01,
                         help='entropy term coefficient (default: 0.01)')
+    parser.add_argument("--use_entropy_anneal", action='store_true', default=False,
+                        help="linearly anneal entropy_coef from its initial value to --entropy_coef_min over training (used by the MEC runner)")
+    parser.add_argument("--entropy_coef_min", type=float, default=0.0,
+                        help="floor for the annealed entropy coefficient (default: 0.0)")
+    parser.add_argument("--mec_logstd_init", type=float, default=-1.9,
+                        help="initial log-std of the MEC actor's Gaussian velocity heads (sigma=exp); -1.9 => sigma~0.15 to avoid max-speed careening")
     parser.add_argument("--target_kl", type=float, default=None,
                         help="optional approximate-KL threshold for early stopping PPO epochs")
     parser.add_argument("--value_loss_coef", type=float,

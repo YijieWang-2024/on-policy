@@ -16,6 +16,11 @@ stock R_MAPPO trainer with no change to the PPO loop. The critic is reused
 (R_Critic) on the centralized share_obs. Velocities are unsquashed (the env
 projects to the velocity disk, the library's Box convention); beta uses a Beta
 distribution (spec R6) so it is naturally bounded on [0,1] with no clipping bias.
+
+The Gaussian velocity heads' initial log-std is set by ``args.mec_logstd_init``
+(default -1.9 => sigma~0.15). A small initial sigma keeps exploration local so the
+learned mean dominates; a large sigma (the old fixed 0 => sigma 1) made samples
+saturate the velocity disk and the swarm careen at max speed (see spec section 10).
 """
 
 from __future__ import annotations
@@ -62,12 +67,13 @@ class MECActor(nn.Module):
             return init(m, init_method, lambda x: nn.init.constant_(x, 0), gain=0.01)
 
         h = self.hidden_size
+        logstd_init = float(getattr(args, "mec_logstd_init", 0.0))
         # major head: hub velocity (2-d Gaussian)
         self.major_mean = init_(nn.Linear(h, self.VEL_DIM))
-        self.major_logstd = nn.Parameter(torch.zeros(self.VEL_DIM))
+        self.major_logstd = nn.Parameter(torch.full((self.VEL_DIM,), logstd_init))
         # minor head: UAV velocity (2-d Gaussian) + offload beta (Beta on [0,1])
         self.minor_mean = init_(nn.Linear(h, self.VEL_DIM))
-        self.minor_logstd = nn.Parameter(torch.zeros(self.VEL_DIM))
+        self.minor_logstd = nn.Parameter(torch.full((self.VEL_DIM,), logstd_init))
         self.minor_beta = init_(nn.Linear(h, 2))   # -> softplus + 1 => (alpha, beta) >= 1
 
         self.to(device)

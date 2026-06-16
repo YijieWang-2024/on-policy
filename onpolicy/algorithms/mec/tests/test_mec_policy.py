@@ -6,7 +6,7 @@ log-probs for the SAME (obs, action) before any gradient step. If they disagree,
 the PPO importance ratio is wrong (role routing / Beta math bug). Also checks
 role routing (major beta slot is a dummy, ignored) and gradient flow.
 
-Run: /opt/anaconda3/envs/marl/bin/python -m onpolicy.algorithms.mec.tests.test_mec_policy
+Run: conda run -n marl python -m onpolicy.algorithms.mec.tests.test_mec_policy
 """
 
 from __future__ import annotations

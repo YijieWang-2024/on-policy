@@ -207,6 +207,34 @@ onpolicy/scripts/results/MPE/<scenario>/<algorithm>/<experiment>/runN/gifs/rende
 `models/config.json` 保存这些参数；MEC 的评估和渲染脚本会在传入 `--model_dir`
 时自动读取该配置。命令行中显式传入的参数仍会覆盖保存配置。
 
+## MEC 环境(HAP/UAV，分层空中边缘计算）
+
+可移动算力中枢（major）+ K 架同构 UAV（minor）协同服务漂移的 IoRT 需求场，
+major-minor 共享参数 MAPPO（`onpolicy/algorithms/mec/mec_policy.py`）。完整设计与
+训练实证见 [`docs/mec_env_port_spec.md`](docs/mec_env_port_spec.md)。
+
+两个场景（`onpolicy/envs/mec/scenarios/`）：
+
+- `v2_iort_6km_mmwave`：锁定真源，物理方程与原仿真器逐步对拍的基准。**在该参数下，
+  由于几何过覆盖 + 重过载，UAV 定位对团队成本几乎无影响，RL 学不出 demand-matching**
+  （详见 spec §10）。
+- `v3_iort_learnable`：由 v2 派生的学习友好场景（K=12 + 算力×2 + 队列×1.5），使定位
+  成为承重决策。MAPPO 在此学出 demand-matching（W₁ 低于手工启发式）。
+
+训练（CPU、K=12，约 1 小时 / 1.5e6 步）：
+
+```bash
+python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo \
+  --mec_scenario v3_iort_learnable --seed 1 --n_rollout_threads 16 --episode_length 200 \
+  --num_env_steps 1500000 --ppo_epoch 5 --hidden_size 128 --layer_N 2 \
+  --use_entropy_anneal --entropy_coef 0.003 --mec_logstd_init -1.9 --use_wandb --cuda
+```
+
+MEC 专用参数：`--mec_scenario`、`--mec_fleet_size`（覆盖 K）、`--mec_logstd_init`
+（高斯速度头初始 logstd，默认 -1.9 → σ≈0.15，避免满速乱窜）、`--use_entropy_anneal`
+（熵系数线性退火）。评测用 `onpolicy.scripts.eval.eval_mec`（policy / heuristic /
+hover / random 对比 W₁、成本份额、中枢消融）。
+
 ## 测试
 
 ```bash

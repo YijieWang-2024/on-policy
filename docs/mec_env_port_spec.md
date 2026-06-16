@@ -28,6 +28,15 @@
 能耗 ~9% —— **处理/卸载主导、覆盖次要但承重,三类动作(UAV 位置 / β / 中枢轨迹)消融全部显著**。
 **目标函数 = 最小化丢失的 fresh data(源失效与溢出等权,λ_ovf≤λ_src)**;不得用不等权人为凹份额(§9 陷阱)。
 
+> **⚠️ 2026-06-15 训练实证补充(详见 §10)**:上面"期望涌现"在**本节锁定的 v2 参数下经真实 RL 训练被证伪**。
+> 24 架 × 861m 覆盖半径对 6km 场地**过覆盖**(≈1.55×)、且 offered≈33 vs 容量 13.5 的 **2.4× 过载**,
+> 使"UAV 定位 / demand-matching"对团队成本的影响仅 **~3.6%**(heuristic vs hover),**小于每-episode 外生噪声(~11%)**;
+> MAPPO 跟着噪声漂移,学出的策略**反而劣于 hover**(W₁ 835m > random,成本 > hover)。
+> **派生 v3 学习友好场景**(`v3_iort_learnable.yaml`:K=12 + 算力×2 + 队列×1.5 → 定位敏感度 +26%)+ 探索修复
+> (`--mec_logstd_init -1.9`、`--use_entropy_anneal`)后,demand-matching **才真正从团队成本最小化中涌现**
+> (eval W₁ 733m < 启发式 763 < hover 830 < random 1155;成本 0.509 ≈ 启发式、胜 hover 24%;中枢消融 +27.9%;详见 §10.3,含 log-prob 修复 + entropy 0.003)。
+> **v2 仍作为锁定真源与数值对拍基准保留不变;v3 是面向"可学习"的派生场景。**
+
 **卖点**(方法主导):finite-K 无损测度值重构 + Wasserstein descriptor 误差界 + SetRec-MAPPO,
 testbed = 上述「可动算力中枢 + 可扩展 UAV 群」二层 MEC(查新无人凑齐,见 §7)。
 
@@ -263,8 +272,12 @@ on-policy 集成:
 - **当前 = mean 描述子(DeepSets 级)**;论文的 **Set Transformer + Sinkhorn 重构**是 drop-in 升级:需在
   forward 里把 batch reshape 回 `(n_env, n_agent, ·)` 做跨 UAV 注意力池化(破坏当前扁平 batch,故留作下一步)。
 
-**有效训练要点**:`--use_valuenorm`(团队代价幅值小,必开)、`--ppo_epoch 10`、`--entropy_coef`(默认 0.01→
-退火)、多 `--n_rollout_threads` 提样本量;K 越大 minor 样本越多、minor 头越稳。
+**有效训练要点(2026-06-15 实证更新,详见 §10)**:**前提是环境让定位承重(v3),否则再调训练也学不动**。
+在 v3 上验证有效:`--use_valuenorm`(团队代价幅值小,必开);**`--mec_logstd_init -1.9`(σ≈0.15,杜绝速度满盘
+乱窜——这是 v2 失败的直接机制之一);`--use_entropy_anneal --entropy_coef 0.003`(低探索任务,0.01 偏高;
+熵线性退火到 0 让策略收敛)**;`--ppo_epoch 5`(过载噪声大,10 易过拟合噪声);`--n_rollout_threads 16`(降梯度方差,实测够用)。
+K 个 minor 行共享同一头但**优势相同、样本高度相关**,有效 batch≈环境数(非 ×K)——这也是为何信号弱时学不动。
+**per-UAV 局部奖励(吞吐项)** 是进一步增强信用分配/压低 W₁ 的可选项;v3 上不加即已学会,故暂留接口未启用。
 
 ### 8.2 集成决策(D1–D6,as-built)
 - **D1 = D1a 折叠版**:单一 nn.Module 内 role 路由双头(major 头 + 共享 minor 头),buffer 仍同质(N=K+1、
@@ -289,6 +302,12 @@ onpolicy/scripts/train/train_mec.py ; config.py(--env_name MEC)
 python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo \
   --mec_scenario v2_iort_6km_mmwave --n_rollout_threads 8 --episode_length 200 \
   --ppo_epoch 10 --hidden_size 128 --use_valuenorm   # --cuda/--use_wandb 为 store_false(传即关)
+
+# v3 学习友好场景(实测能学出 demand-matching,§10);CPU/K=12 约 1 小时 / 1.5e6 步
+python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo \
+  --mec_scenario v3_iort_learnable --seed 1 --n_rollout_threads 16 --episode_length 200 \
+  --num_env_steps 1500000 --ppo_epoch 5 --hidden_size 128 --layer_N 2 \
+  --use_entropy_anneal --entropy_coef 0.003 --mec_logstd_init -1.9 --use_wandb --cuda
 ```
 
 ### 8.4 移植进度
@@ -298,7 +317,10 @@ python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo
 4. ✅ `MEC_env.py`(N=K+1 适配器)+ `mec_runner.py`(D4)+ `train_mec.py`;shared MAPPO smoke 跑通,K=8/16/24/32 同形状可扩展。
 5. ✅ **major-minor `mec_policy.py`(§8.1)**;单元测 4/4(ratio=1、梯度、路由、policy 一致);接入 base_runner。
 6. ✅ §6 体检(启发式级):份额 27/49/14/10、β+44%/hover+24%、置换=0.00;中枢+6%(启发式偏弱,待训练复测)。
-7. ⬜ 真训练到收敛 → W₁ demand-matching 评测 + 中枢消融复核;(可选)Set Transformer 描述子升级。
+7. ✅ **真训练到收敛(2026-06-15,详见 §10)**:v2 锁定参数下 RL **学不出** demand-matching(过覆盖+过载致成本对
+   定位仅~3.6% 敏感,策略漂移到劣于 hover);**派生 v3 学习友好场景**(K=12+算力×2+队列×1.5)后训练成功——
+   eval W₁ 733m(< 启发式 763 < hover 830 < random 1155)、团队成本 0.509(≈启发式 0.500、胜 hover 0.674 约 24%)、
+   中枢消融 +27.9%(修复代码 + entropy 0.003,§10.3)。(可选)Set Transformer 描述子 / per-UAV 局部奖励仍待做。
 
 
 ## 9. 决策历程(归档:被否决/被取代的设计,防止回头路)
@@ -315,6 +337,75 @@ python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo
 | 单一 λ_D 损失权重 | (其实没问题)当时为凹「覆盖份额 20-30%」而嫌它压不下覆盖份额 | 一度拆成 3:8(见下,已回退) |
 | **λ_ovf > λ_src(3:8 拆分)** 凹份额 | 🔴**2e6 步长训练暴露反向激励**:策略故意少接纳避溢出(accepted 19.5M→5.0M、U_src 4.8M→16.9M),压制 demand-matching | **回退到等权 λ_src=λ_ovf=5**(丢一个 bit 就是丢一个 bit);份额改由策略涌现,不再凹 |
 | K=8/16、σ=1000–1500、f_U=2GHz 等中间参数 | 各档体检份额/消融不达标(过程记录在会话) | §5 锁定表 |
+| **纯团队成本下 demand-matching「涌现」(v2 K=24 过覆盖+过载)** | 🔴 **RL 训练证伪**:定位对成本仅~3.6% 敏感(<外生噪声~11%),策略漂移到劣于 hover(W₁ 835>random、成本 0.795>hover 0.709)；启发式体检看不出(它无脑覆盖、不优化成本) | **派生 v3 学习友好场景**(K=12+算力×2+队列×1.5→敏感度+26%)+ 探索修复(`--mec_logstd_init -1.9`/`--use_entropy_anneal`/ppo5/16环境);demand-matching 真正涌现(§10) |
 
 > 历史复审结论仍有效的:R1(env 只回加权物理代价,PopArt 管尺度)、R2(ω 公式派生)、
 > R5(服务位置显式可配,锁定 mid_move)、R6(β 用 Beta)、R7(物理方程主体正确)。R3/R4 被 v2 设计取代。
+
+
+## 10. 训练实证与 v3 学习友好场景(2026-06-15)
+
+> 把 v2 接入 MAPPO 真训练后得到的关键结论。**v2 物理/参数(§1–§7)作为锁定真源与数值对拍基准不变**;
+> 本节记录"为何 v2 学不出 demand-matching"的诊断,以及为研究该决策而派生的 v3 场景。
+
+### 10.1 v2 训练失败与"平地面"诊断
+
+K=24、`v2_iort_6km_mmwave`、MAPPO(8 环境、ppo10、logstd 初始 0)训练 ~6.5e5 步:
+
+- **算法机制健康**:`ratio≡1`、critic `explained_variance≈0.95`、`value_loss` 收敛 —— **不是代码 bug**。
+- **但策略学成了比 hover 还差**:eval(确定性)团队成本 **0.795 > hover 0.709 > 启发式 0.683**;
+  **W₁ 835m > random 736 > hover 603**;`dist_entropy` 趋势/噪声=18.7 坚决下降(在收敛,但收敛到坏策略);
+  速度方向探针显示 minor 速度**错向**(需求在东→却朝西南)、且 σ≈0.8 满速乱窜把 UAV 从栅格初始打散。
+- **定量根因 = 成本对定位几乎不敏感**:启发式(匹配)vs hover 的团队成本只差 **~3.6%**,而每-episode 外生随机
+  (heading U[0,2π)+噪声)给回报带来 ~11% 噪声 → **可控信号 < 噪声**,梯度跟着噪声走。
+- **为何不敏感(两头夹击)**:
+  1. **几何过覆盖**:24 架 × 覆盖半径 861m ≈ 55.9 km² 覆盖 vs 场地 36 km²(1.55×);栅格间距≈半径,
+     **不动也已罩住热点**(hover W₁ 603 < 热点 σ 800)→ 移动 UAV 不增覆盖。
+  2. **重过载**:offered≈33 vs 容量 C_H+K·C_U=13.5(2.4×)→ 绑定约束是处理,不是覆盖;且队列成本 ω_Q
+     与立方计算能耗"骑"在已接纳数据上,使"接纳→排队→溢出"比"源失效"更贵,**等权 λ 仍残留少接纳激励**。
+- **推论**:在 v2 这种 regime 下,"demand-matching 从纯团队成本最小化中涌现"**不可能成立**——因为匹配不降成本。
+
+### 10.2 v3 学习友好场景(`v3_iort_learnable.yaml`,由 v2 派生)
+
+用启发式-vs-hover 成本差作"定位敏感度"指标做参数扫描(`scan_env.py`),锁定改动:
+
+| 改动 | v2 | v3 | 作用 |
+|---|---|---|---|
+| `fleet_size_k` | 24 | **12** | 解过覆盖(覆盖≈0.8×),swarm 必须集中到热点 |
+| `uav.cpu_frequency_hz` | 1 GHz (C_U=0.25) | **2 GHz (C_U=0.5)** | 解过载;"更少但更强"的现代 UAV |
+| `hap.cpu_frequency_hz` | 30 GHz (C_H=7.5) | **60 GHz (C_H=15)** | 容量 13.5→21,过载 2.4×→**1.6×**(仍保留处理瓶颈) |
+| `uav/hap.queue_max_bits` | 80 / 150 Mbit | **120 / 225 Mbit** | ×1.5 缓冲;ω_Q 自动按总容量归一化,几乎不抬惩罚 |
+| 速度 V_U / V_H | 40 / 30 | **40 / 30(不变)** | 大平台更慢、UAV 更敏捷;速度不是瓶颈 |
+
+效果(全网格、8 episode):heuristic-vs-hover 成本差 **+25.8%**(v2 仅 +1.8~3.6%)、W₁ 763<830<1155、
+成本转为 **src(覆盖)主导** → 定位成为主要可控量。
+
+### 10.3 训练修复与 v3 结果
+
+探索修复(算法侧,见 §8.1):`--mec_logstd_init -1.9`(σ≈0.15)、`--use_entropy_anneal`、`--entropy_coef 0.003`、
+`--ppo_epoch 5`、`--n_rollout_threads 16`;**未启用** per-UAV 局部奖励(env 修复后团队信号已够)。
+
+> **log-prob 形状修复(2026-06-15)**:连续动作下 buffer 曾把 actor 的 joint log-prob `[.,1]` 广播成 act_dim 列,
+> 使 PPO actor 损失被放大 act_dim=3×(上游 on-policy 通病,非 MEC 引入;Discrete 不受影响)。已在
+> `shared_buffer.py`/`separated_buffer.py` 修正(joint 存宽度 1)。该 bug 经 Adam 大部分抵消,唯一实质效应是把
+> 有效 entropy_coef 压到约 1/3;修复后显式用 `entropy_coef=0.003` 复现并略超原结果。下表为**修复后**数据。
+
+v3 训练(K=12,1.5e6 步,CPU ~1h,seed 1,修复代码 + entropy 0.003):
+
+| | 训练策略 | 启发式 | hover | random |
+|---|---|---|---|---|
+| 团队成本/slot | **0.509** | 0.500 | 0.674 | — |
+| **W₁ (m)** | **733** | 763 | 830 | 1155 |
+| 中枢消融(冻结@中心) | **+27.9%** | — | — | — |
+
+W₁ 733 比 hover 低 12%(eval 脚本判定 GOAL MET)、比 random 低 36%;reward 全程上升(trend/noise 4.5)。
+(注:训练期 mec/w1 是带探索噪声的末步快照,偏平;确定性 eval 的 W₁=733 才是权威值。)
+
+**结论**:demand-matching 真正从团队成本最小化中涌现,**W₁ 低于手工启发式**,中枢轨迹强承重,accepted 不崩塌。
+卖点(可动中枢 + demand-matching)在 v3 + 正确 PPO 实现上由学习策略实证成立。
+
+### 10.4 待办
+- 多种子复现(论文建议 3–5 个;当前 seed 1/2)。
+- (可选)per-UAV 局部奖励(吞吐项,w 可调)进一步压低 W₁ / 改信用分配。
+- (可选)在 v3 算力下扫 K=8/16/24 展示可扩展性,并实证"过覆盖"是 v2 病因。
+- **排列不变性尚未贯穿集中 critic**(`share_obs` 有序拼接);Set Transformer 描述子升级(§8.1)是后续工作。

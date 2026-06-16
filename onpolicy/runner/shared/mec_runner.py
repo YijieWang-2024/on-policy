@@ -23,7 +23,7 @@ class MECRunner(MPERunner):
     def log_env(self, env_infos, total_num_steps):
         """Also surface team MEC metrics (carried on the major agent's info slot)."""
         keys = ("training_cost", "src_cost", "ovf_cost", "queue_cost",
-                "energy_cost", "accepted", "offloaded", "overflow", "U_src")
+                "energy_cost", "accepted", "offloaded", "overflow", "U_src", "w1")
         for key in keys:
             vals = []
             for info in getattr(self, "_last_infos", []):
@@ -32,7 +32,32 @@ class MECRunner(MPERunner):
                     vals.append(major[key])
             if vals:
                 env_infos[f"mec/{key}"] = vals
+        self._print_mec_summary(env_infos)
         super().log_env(env_infos, total_num_steps)
+
+    @staticmethod
+    def _print_mec_summary(env_infos):
+        """One-line console trace of the validation metrics (last-step, thread-mean).
+
+        Lets a plain log tail track whether `accepted` collapses and whether `w1`
+        drops over training without opening TensorBoard. These are last-step
+        snapshots; the deterministic episode-mean truth comes from eval_mec.py.
+        """
+        def m(key):
+            vals = env_infos.get(f"mec/{key}")
+            return float(np.mean(vals)) if vals else float("nan")
+
+        acc, usrc, total = m("accepted"), m("U_src"), m("training_cost")
+        denom = acc + usrc
+        accept_rate = 100.0 * acc / denom if denom > 0 else float("nan")
+        share = lambda k: 100.0 * m(k) / total if total else float("nan")
+        print(
+            f"  [mec] accept={accept_rate:4.1f}%  accepted={acc/1e6:5.1f}  "
+            f"ovf={m('overflow')/1e6:4.1f}  U_src={usrc/1e6:5.1f} Mbit/slot  "
+            f"W1={m('w1'):6.0f} m  | shares src={share('src_cost'):3.0f}% "
+            f"ovf={share('ovf_cost'):3.0f}% q={share('queue_cost'):3.0f}% "
+            f"e={share('energy_cost'):3.0f}%"
+        )
 
     def insert(self, data):
         # stash the latest infos so log_env can read team metrics

@@ -45,9 +45,12 @@ class SeparatedReplayBuffer(object):
             self.available_actions = None
 
         act_shape = get_shape_from_act_space(act_space)
+        # joint log-prob is width 1 for Discrete/Box; only MultiDiscrete is per-dim
+        # (see shared_buffer note: act_shape here would triple-count the Box loss).
+        log_prob_shape = act_shape if act_space.__class__.__name__ == "MultiDiscrete" else 1
 
         self.actions = np.zeros((self.episode_length, self.n_rollout_threads, act_shape), dtype=np.float32)
-        self.action_log_probs = np.zeros((self.episode_length, self.n_rollout_threads, act_shape), dtype=np.float32)
+        self.action_log_probs = np.zeros((self.episode_length, self.n_rollout_threads, log_prob_shape), dtype=np.float32)
         self.rewards = np.zeros((self.episode_length, self.n_rollout_threads, 1), dtype=np.float32)
         
         self.masks = np.ones((self.episode_length + 1, self.n_rollout_threads, 1), dtype=np.float32)

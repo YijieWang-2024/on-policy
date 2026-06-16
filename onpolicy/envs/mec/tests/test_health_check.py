@@ -8,7 +8,7 @@ LOOSELY (directional), not to the percent -- the heuristic is not the learned
 policy and the demand heading is random per seed. Permutation invariance is the
 one strict check (it is a correctness property, not a tuning outcome).
 
-Run: /opt/anaconda3/envs/marl/bin/python -m onpolicy.envs.mec.tests.test_health_check
+Run: conda run -n marl python -m onpolicy.envs.mec.tests.test_health_check
 """
 
 from __future__ import annotations

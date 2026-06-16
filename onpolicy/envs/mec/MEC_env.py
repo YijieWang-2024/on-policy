@@ -1,12 +1,15 @@
 """Multi-agent adapter: wrap FiniteKHAPUAVMECEnv into the on-policy list interface.
 
-D1b (unified homogeneous agents) for the shared-MAPPO smoke milestone:
-N = K+1 agents (agent 0 = major/hub, agents 1..K = minor UAVs). All agents share
-one 14-d observation layout and one 3-d Box action; a role flag distinguishes
-major from minor. The major uses action dims [0,1] as v^H and ignores dim 2; each
-minor uses [0,1] as v_i and dim 2 as beta in [0,1]. This runs on the stock shared
-runner with only a Box passthrough (D4, see mec_runner). D1a (separate actors) is
-the later upgrade; see docs/mec_env_port_spec.md section 8.
+Homogeneous N = K+1 agent layout for the as-built D1a-folded design (spec
+section 8.2): agent 0 = major/hub, agents 1..K = minor UAVs. All agents share one
+14-d observation layout and one 3-d Box action; a role flag distinguishes major
+from minor. The major uses action dims [0,1] as v^H and ignores dim 2; each minor
+uses [0,1] as v_i and dim 2 as beta in [0,1]. The actual role routing (separate
+major head + shared minor head) lives in MECActor (algorithms/mec/mec_policy.py);
+the buffer stays homogeneous so this runs on the stock shared runner with only a
+Box passthrough (D4, see mec_runner). The single-head D1b variant (padding + role
+one-hot) was rejected; the later upgrade is the Set Transformer population
+descriptor (spec section 8.1).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ except Exception:  # pragma: no cover
 
 from onpolicy.envs.mec.config_loader import load_scenario
 from onpolicy.envs.mec.finite_k_env import FiniteKHAPUAVMECEnv
+from onpolicy.envs.mec.metrics import demand_matching_w1
 
 OBS_DIM = 14  # role(1) + own(3) + hub(3) + demand(4) + descriptor(3)
 ACT_DIM = 3   # [vx, vy, beta_raw]; major ignores beta_raw
@@ -93,6 +97,13 @@ class MECEnv:
         return rows
 
     def _agent_infos(self, info: dict[str, Any], reward: float) -> list[dict]:
+        # W1 demand-matching (mass-weighted nearest-UAV distance, m) on the
+        # pre-step state, matching eval_mec.py's convention so the training-time
+        # mec/w1 curve is comparable to the deterministic eval number. Lower =
+        # the swarm sits where the demand is.
+        uav_xy = np.asarray(info["uav_xy_m"], float)
+        center = np.asarray(info["demand_center_m"], float)
+        w1 = demand_matching_w1(uav_xy, self.env.grid_xy, self.env._demand_density(center)[0])
         cost = {
             "training_cost": info.get("training_cost"),
             "src_cost": info.get("src_cost_component"),
@@ -103,6 +114,7 @@ class MECEnv:
             "accepted": float(np.sum(info.get("A_i", 0.0))),
             "offloaded": float(np.sum(info.get("B_i", 0.0))),
             "overflow": float(np.sum(info.get("D_i_U", 0.0))) + float(info.get("D_H", 0.0)),
+            "w1": float(w1),
         }
         infos = [{"individual_reward": reward} for _ in range(self.num_agents)]
         infos[0].update(cost)  # team metrics ride on the major agent's info slot

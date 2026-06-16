@@ -71,6 +71,10 @@ class MPERunner(Runner):
         for episode in range(episodes):
             if self.use_linear_lr_decay:
                 self.trainer.policy.lr_decay(episode, episodes)
+            if getattr(self.all_args, "use_entropy_anneal", False):
+                frac = max(0.0, 1.0 - episode / max(1, episodes))
+                emin = getattr(self.all_args, "entropy_coef_min", 0.0)
+                self.trainer.entropy_coef = emin + (self.all_args.entropy_coef - emin) * frac
 
             for step in range(self.episode_length):
                 rollout = self.collect(step)

@@ -1,5 +1,156 @@
 # Work Notes
 
+## 2026-06-16 - Archive checkpoint: MEC v3 training and PPO log-prob fix
+
+### Summary
+
+Created a Git checkpoint for the current MEC research branch. This archive captures
+the transition from a physically locked but hard-to-learn v2 setup to the learnable
+v3 scenario, plus the PPO continuous-action `action_log_probs` buffer fix needed for
+correct actor-loss scaling.
+
+### Scope
+
+- MEC v3 scenario: K=12, doubled compute capacity, larger queues, and updated docs
+  explaining why v2 remains a parity baseline while v3 is used for learnability.
+- Training stability: low initial MEC Gaussian log-std, entropy annealing arguments,
+  and MEC console/WandB metrics including demand-matching W1.
+- Correctness fix: shared and separated replay buffers now store joint log-probs
+  with width 1 for Box/Discrete actions, avoiding act-dim broadcast amplification.
+- Documentation: README/spec/work notes now record the v2 flat-landscape diagnosis,
+  v3 training command, verified result, and remaining follow-up items.
+
+### Verification recorded
+
+Previous run recorded in this note set:
+
+```bash
+conda run -n marl python -m pytest tests onpolicy/envs/mec/tests onpolicy/algorithms/mec/tests -q
+# 26 passed, 1 skipped, 20 subtests passed
+```
+
+## 2026-06-15 - Fix action_log_probs broadcast (act_dim x policy-loss amplification)
+
+### Summary
+
+Found and fixed a real shape bug inherited from upstream on-policy: for continuous
+(Box) action spaces the actor returns a single JOINT log-prob `[.,1]`, but the
+replay buffers allocated `action_log_probs` with `act_shape` columns
+(`get_shape_from_act_space(Box)=act_dim`). NumPy broadcasts the scalar into
+`act_dim` identical columns on insert, and `r_mappo`'s `torch.sum(min(surr1,surr2),
+dim=-1)` then sums those copies, multiplying the PPO **actor loss/gradient by
+act_dim** (3x for MEC's `[vx,vy,beta]`). Discrete spaces (act_shape=1, e.g. MPE
+simple_spread) are unaffected.
+
+### Evidence (empirical, `verify_logprob_bug.py`)
+
+- actor `get_actions` -> `action_log_probs` shape `[B,1]` (joint).
+- buffer stored width 3, value broadcast to `[x,x,x]`.
+- exact r_mappo math: `policy_loss` current 0.2914 vs correct 0.0971 = **3.0000x**;
+  actor grad-norm 40.35 vs 13.45 = 3x.
+
+### Impact (why v3 still learned)
+
+With Adam, a global kx on the policy gradient ~cancels in `m/sqrt(v)`, and when the
+grad-norm exceeds `max_grad_norm=10` it is fully absorbed by clipping. The only
+material residue: the SEPARATE entropy term is not amplified, so the effective
+entropy coefficient was ~1/3 of nominal. v3 deliberately uses low exploration
+(`logstd_init=-1.9`, entropy anneal), so the prior v3 result was not invalidated.
+
+**Confirmed on fixed code**: re-running v3 (seed 1) with `entropy_coef=0.01` softened
+slightly (cost 0.568, W1 787, hub +15%) because the fix restored entropy to nominal
+(too high here); setting `entropy_coef=0.003` (~= the effective value the bug had been
+producing) recovered and slightly exceeded the original: **cost 0.509, W1 733 (12%
+better than hover, eval "GOAL MET"), hub ablation +27.9%**. The final correct config
+is v3 + `--mec_logstd_init -1.9 --use_entropy_anneal --entropy_coef 0.003 --ppo_epoch 5`.
+
+### Fix
+
+- `onpolicy/utils/shared_buffer.py` and `onpolicy/utils/separated_buffer.py`:
+  allocate `action_log_probs` with last dim `1` for Discrete/Box (joint log-prob),
+  keeping `act_shape` only for MultiDiscrete (per-dim, as `ACTLayer` emits). Single
+  localized change; generators read `shape[-1]` so they adapt.
+
+### Verification
+
+```bash
+conda run -n marl python -m pytest tests onpolicy/envs/mec/tests onpolicy/algorithms/mec/tests -q
+# 26 passed, 1 skipped, 20 subtests passed (no regression; MPE Discrete unaffected)
+```
+
+## 2026-06-15 - MEC v3 learnable scenario, flat-landscape diagnosis, first successful training
+
+### Summary
+
+Trained MAPPO on the MEC env end-to-end. The locked v2 scenario does **not** learn
+demand-matching: the cost landscape is nearly flat w.r.t. UAV positioning, so the
+policy drifts to a worse-than-hover solution. Diagnosed the root cause, derived a
+learnable **v3** scenario, added exploration fixes, and trained a policy that
+learns demand-matching (W1 below the hand-designed heuristic). Synchronized all
+docs/comments with the finding.
+
+### Diagnosis (why v2 failed)
+
+- PPO machinery is healthy (ratio==1, critic explained_variance ~0.95) -- not a bug.
+- The trained v2 policy is **worse than hover** on both cost (0.795 vs 0.709) and
+  W1 (835 m vs 603 m); entropy collapses onto a noise-driven, wrong-direction policy.
+- Quantified cause: demand-matching (heuristic) beats hover by only **~3.6%** on team
+  cost, below the ~11% per-episode exogenous noise -> the policy gradient follows noise.
+- Two structural reasons positioning barely affects cost:
+  1. **Geometric over-provisioning**: 24 UAVs x 861 m coverage over-cover the 6 km
+     field (~1.55x); hovering already blankets the hotspot (hover W1 603 < sigma 800).
+  2. **Severe overload**: offered ~33 vs capacity 13.5 Mbit/slot (2.4x); the binding
+     constraint is processing, not coverage, and queue/energy costs ride on accepted
+     data so equal lambda still leaves a mild under-collection incentive.
+
+### Key changes
+
+- Added **`onpolicy/envs/mec/scenarios/v3_iort_learnable.yaml`** (derived from v2):
+  K=12, uav cpu 1->2 GHz (C_U 0.25->0.5), hap cpu 30->60 GHz (C_H 7.5->15, overload
+  2.4x->1.6x), queues x1.5; speeds unchanged (UAV 40 > HAP 30). Verified positioning
+  is now load-bearing: heuristic-vs-hover cost gap +26% (was +1.8%), cost becomes
+  source-loss (coverage) dominated.
+- Exploration fixes: `--mec_logstd_init` (default -1.9, sigma~0.15; was a fixed 0 ->
+  sigma 1 max-speed careening) in `MECActor`; `--use_entropy_anneal` /
+  `--entropy_coef_min` linear entropy-coef anneal in the shared runner; new args in
+  `config.py`.
+- Added a per-log-interval `[mec]` console trace and a training-time W1 metric
+  (`mec/w1`) to `mec_runner` / `MEC_env` for live monitoring.
+- Doc/comment sync: fixed the stale `test_health_check.py` run command; updated the
+  yaml lambda-description comment; rewrote `docs/mec_env_port_spec.md` to add a
+  prominent diagnosis note in section 0, refreshed training tips (8.1), v3 training
+  command (8.3), progress (8.4), a decision-history row (9), and a new section 10
+  documenting the diagnosis + v3 + results.
+
+### v3 result (K=12, 1.5e6 steps, CPU ~1 h, seed 1)
+
+(Numbers below are the FIRST success, produced before the action_log_probs fix
+documented in the newer note above. The corrected-code final config -- fix +
+`entropy_coef=0.003` -- recovers/slightly exceeds them: cost 0.509, W1 733
+"GOAL MET", hub +27.9%.)
+
+| controller | team cost/slot | W1 (m) | hub ablation |
+|---|---|---|---|
+| trained policy | 0.514 | **755** | +25.3% |
+| heuristic | 0.500 | 763 | - |
+| hover | 0.674 | 830 | - |
+| random | - | 1155 | - |
+
+Full-run trends (trend/noise): reward -133->-105 (7.7), W1 986->796 (2.6), accepted
+13.7->16.5, U_src 10.6->7.4 (2.9). Velocity-direction probe: minor mean velocity now
+points toward the demand (v2 pointed the wrong way). Demand-matching emerges from
+team-cost minimization; W1 beats the hand-designed heuristic. A second seed is training.
+
+### Verification
+
+```bash
+conda run -n marl python -m pytest tests onpolicy/envs/mec/tests onpolicy/algorithms/mec/tests -q
+# 26 passed, 1 skipped, 20 subtests passed (unchanged by the edits)
+conda run -n marl python -m onpolicy.scripts.eval.eval_mec --env_name MEC \
+  --mec_scenario v3_iort_learnable --mec_eval_controller policy \
+  --model_dir <run1/models> --mec_eval_episodes 8
+```
+
 ## 2026-06-15 - MEC environment port, testing, and checkpoint config
 
 ### Summary
