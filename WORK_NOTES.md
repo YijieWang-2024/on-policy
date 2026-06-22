@@ -1,5 +1,71 @@
 # Work Notes
 
+## 2026-06-17 - Static demand inverse design, v4/v5 scenarios, random initialization
+
+### Summary
+
+Pivoted from moving-hotspot tracking (hard; major head kept failing to follow the
+swarm) to **static demand with inverse design**: define the desired two-layer
+deployment first, then tune the environment so that deployment is the unique cost
+minimum, then verify RL emerges it.
+
+### Key findings
+
+**Scenario evolution (see HANDOFF.md §5 for full detail):**
+- v3 (moving hotspot): learned demand-matching but hub lagged swarm by 1528 m;
+  hub ablation negative on moving targets (major head overwhelmed 1/K gradient share).
+- v4 (static hotspot, fixed 0.85R start): W₁ 2220→505 GOAL MET, hub ablation +71%
+  (static target fixed the major head); but deployments showed a **systematic vertical
+  band bias** — swarm always shifted toward the hotspot from the same direction.
+  Root cause: fixed starting corner created a directional habit, not relative steering.
+- v4-fixed (hotspot and start both fixed): exploration deadlock — group never left the
+  staging point (accept ≈ 0). Shows that randomization is the curriculum.
+- **v5 (random hotspot + random swarm/hub start, current main branch)**:
+  Symmetric convergence around hotspot (band bias gone); hub-to-hotspot 1185→555 m.
+  New issue: all 16 UAVs crowd the hotspot (13.8 of 16 within 1.5σ), background
+  abandoned — root cause is the ×4 access bandwidth scaffold making hotspot marginal
+  value too high (n*=5 trough is shallow at access×4).
+
+**Phase-1 inverse design probe (phase1_design.py):**
+Recipe [C]: K=16, σ=600, peak=0.008, bg=1e-5, C_U=0.35 (f_U=1.4 GHz),
+C_H=10.5 (f_H=42 GHz), access bandwidth ×4 (320 MHz scaffold).
+n*=5 verified: cost trough at n=3-5 hotspot UAVs, 6th UAV better on background;
+single-UAV overflow → 3 UAVs clear it (soft-split sharing confirmed).
+cap/offered=0.87, ovf=0 (capacity covers demand).
+
+**Code changes (on top of v3 work):**
+- `finite_k_env.py`: added `_initial_deployment()` — per-episode random hub/swarm
+  centroid in [0.3,0.7]² box; 16 UAVs on a 1km×1km 4×4 grid (333m spacing, zero
+  collision penalty); backward-compatible (falls back to yaml fixed values when
+  `initial_deploy` key absent).
+- `finite_k_env.py`: `_initial_demand_motion` supports `initial_center_frac_range`
+  for per-episode random hotspot centre.
+- `config_loader.py`: UAV generator `cluster` (compact staging formation at a given
+  corner frac) and hub `swarm_centroid` (hub start = UAV centroid).
+- New scenarios: `v4_static_demand.yaml`, `v4_fixed_demand.yaml`,
+  `v5_static_randinit.yaml` (all derived from v3 via make_v4.py / direct edit).
+
+**Access model clarification:**
+Orthogonal FDMA (W/K per UAV, bare SNR) is the confirmed and final access model.
+A full-reuse SINR interference model was attempted but produced 10× rate collapse
+for 2 vs 1 co-located UAVs — interference too strong, reverted to orthogonal.
+HANDOFF.md §6 notes this constraint explicitly.
+
+**Open problem:** v5 all-hotspot crowding. Next step: reduce access bandwidth from
+320 MHz back to physical 80 MHz (W/K shrinks → hotspot marginal rate drops with
+added UAVs → two-layer becomes optimal). Use phase1_design.py at 80 MHz to verify
+n* stays ≈ 5 before retraining.
+
+### Verification
+
+```bash
+C:/Users/Administrator/anaconda3/envs/marl/python.exe -m pytest onpolicy/envs/mec/tests -q
+# 12 passed, 1 skipped
+```
+
+v5 training (seed 1, 1.5e6 steps): reward −68→−42 (trend/noise 4.3), W₁ 565→360,
+accept 14.4→17.2, U_src 4.0→1.27 (96% acceptance), ovf ≈ 0 throughout.
+
 ## 2026-06-16 - Archive checkpoint: MEC v3 training and PPO log-prob fix
 
 ### Summary

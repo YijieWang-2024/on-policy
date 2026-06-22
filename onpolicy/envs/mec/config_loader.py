@@ -202,22 +202,52 @@ def _generate_uav_deployment(cfg: dict[str, Any]) -> None:
     spec = uav["initial_xy_m"]
     if isinstance(spec, list):
         return
-    if spec.get("generator") != "grid":
-        raise ValueError(f"unsupported uav.initial_xy_m generator: {spec.get('generator')}")
+    gen = spec.get("generator")
     k = int(cfg["env"]["fleet_size_k"])
     lx = float(cfg["env"]["region"]["lx_m"])
     ly = float(cfg["env"]["region"]["ly_m"])
-    margin = float(spec.get("margin_frac", 0.2))
     g = int(np.ceil(np.sqrt(k)))
-    span = 1.0 - 2.0 * margin
-    pts: list[list[float]] = []
-    for i in range(g):
-        for j in range(g):
-            if len(pts) < k:
-                fx = margin + (span * i / (g - 1) if g > 1 else span / 2.0)
-                fy = margin + (span * j / (g - 1) if g > 1 else span / 2.0)
-                pts.append([lx * fx, ly * fy])
-    uav["initial_xy_m"] = pts
+    if gen == "grid":
+        margin = float(spec.get("margin_frac", 0.2))
+        span = 1.0 - 2.0 * margin
+        pts: list[list[float]] = []
+        for i in range(g):
+            for j in range(g):
+                if len(pts) < k:
+                    fx = margin + (span * i / (g - 1) if g > 1 else span / 2.0)
+                    fy = margin + (span * j / (g - 1) if g > 1 else span / 2.0)
+                    pts.append([lx * fx, ly * fy])
+        uav["initial_xy_m"] = pts
+    elif gen == "cluster":
+        # Compact staging formation centered at center_frac, side = cluster_frac*region.
+        # Mutual spacing = side/(g-1) is kept >> d_min so no initial collision penalty;
+        # used to place the swarm AWAY from the demand start so positioning is forced.
+        cfrac = float(spec.get("cluster_frac", 0.10))
+        cx, cy = (float(v) for v in spec.get("center_frac", [0.75, 0.75]))
+        side_x, side_y = cfrac * lx, cfrac * ly
+        pts = []
+        for i in range(g):
+            for j in range(g):
+                if len(pts) < k:
+                    ox = (i / (g - 1) - 0.5 if g > 1 else 0.0) * side_x
+                    oy = (j / (g - 1) - 0.5 if g > 1 else 0.0) * side_y
+                    px = min(max(lx * cx + ox, 0.0), lx)
+                    py = min(max(ly * cy + oy, 0.0), ly)
+                    pts.append([px, py])
+        uav["initial_xy_m"] = pts
+    else:
+        raise ValueError(f"unsupported uav.initial_xy_m generator: {gen}")
+    _apply_hub_initial(cfg)
+
+
+def _apply_hub_initial(cfg: dict[str, Any]) -> None:
+    """Hub start = UAV swarm centroid when configured 'swarm_centroid' (the hub and
+    fleet deploy together from one staging point); else keep the explicit xy."""
+    hap = cfg["env"]["hap"]
+    spec = hap.get("initial_xy_m")
+    if isinstance(spec, dict) and spec.get("generator") == "swarm_centroid":
+        pts = np.asarray(cfg["env"]["uav"]["initial_xy_m"], dtype=float)
+        hap["initial_xy_m"] = [float(pts[:, 0].mean()), float(pts[:, 1].mean())]
 
 
 def _broadcast_initial_queues(cfg: dict[str, Any]) -> None:

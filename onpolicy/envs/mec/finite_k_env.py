@@ -64,10 +64,11 @@ class FiniteKHAPUAVMECEnv:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         center, velocity = self._initial_demand_motion()
+        hub_xy, uav_xy = self._initial_deployment()
         self.state = EnvState(
-            hap_xy_m=np.array(self.cfg["env"]["hap"]["initial_xy_m"], dtype=float),
+            hap_xy_m=hub_xy,
             hap_queue_bits=float(self.cfg["env"]["hap"]["initial_queue_bits"]),
-            uav_xy_m=np.array(self.cfg["env"]["uav"]["initial_xy_m"], dtype=float),
+            uav_xy_m=uav_xy,
             uav_queue_bits=np.array(self.cfg["env"]["uav"]["initial_queue_bits"], dtype=float),
             demand_center_m=center,
             demand_velocity_mps=velocity,
@@ -77,6 +78,31 @@ class FiniteKHAPUAVMECEnv:
             "demand_center_m": center.copy(),
             "demand_velocity_mps": velocity.copy(),
         }
+
+    def _initial_deployment(self) -> tuple[np.ndarray, np.ndarray]:
+        """Hub + UAV start positions.
+
+        If env.uav.initial_deploy.random_centroid is set, each episode samples the
+        swarm centroid (= hub) uniformly in a central frac box, then lays the K UAVs
+        on a square grid spanning a fixed side around that centroid. This removes the
+        fixed-corner directional bias (the swarm no longer learns a constant offset
+        vector). Otherwise the static yaml positions are used (back-compatible).
+        """
+        dep = self.cfg["env"]["uav"].get("initial_deploy")
+        if not dep or not dep.get("random_centroid"):
+            hub = np.array(self.cfg["env"]["hap"]["initial_xy_m"], dtype=float)
+            uav = np.array(self.cfg["env"]["uav"]["initial_xy_m"], dtype=float)
+            return hub, uav
+        (lo_x, hi_x), (lo_y, hi_y) = dep["centroid_frac_range"]
+        cx = self.rng.uniform(float(lo_x), float(hi_x)) * self.lx
+        cy = self.rng.uniform(float(lo_y), float(hi_y)) * self.ly
+        side = float(dep.get("grid_side_m", 1000.0))
+        g = int(math.ceil(math.sqrt(self.k)))
+        offs = (np.arange(g) / (g - 1) - 0.5) * side if g > 1 else np.array([0.0])
+        pts = [[cx + offs[i], cy + offs[j]] for i in range(g) for j in range(g)]
+        uav = self._clip_xy(np.array(pts[: self.k], dtype=float))
+        hub = self._clip_xy(np.array([cx, cy], dtype=float))
+        return hub, uav
 
     def step(self, action: dict[str, Any]):
         if self.state is None:
@@ -215,7 +241,16 @@ class FiniteKHAPUAVMECEnv:
 
     def _initial_demand_motion(self) -> tuple[np.ndarray, np.ndarray]:
         proc = self.cfg["demand"]["process"]
-        frac = np.array(proc["initial_center_frac"], dtype=float)
+        rng = proc.get("initial_center_frac_range")
+        if rng is not None:
+            # per-episode random hotspot centre, sampled in a central box (lo,hi per
+            # axis) so it is never near a boundary; policy must observe & respond.
+            (lo_x, hi_x), (lo_y, hi_y) = rng
+            fx = self.rng.uniform(float(lo_x), float(hi_x))
+            fy = self.rng.uniform(float(lo_y), float(hi_y))
+            frac = np.array([fx, fy], dtype=float)
+        else:
+            frac = np.array(proc["initial_center_frac"], dtype=float)
         center = frac * np.array([self.lx, self.ly], dtype=float)
         theta = self.rng.uniform(0.0, 2.0 * math.pi)
         speed = float(proc["speed_mps"])

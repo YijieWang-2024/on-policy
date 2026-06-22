@@ -4,8 +4,8 @@
 # 接入 sub-6 2.4GHz(覆盖半径 ~861m);回传 60GHz mmWave 专波束(服务半径 ~2.2km)
 # 注:键名沿用原仓库 `hap`(= 低空算力中枢,已非高空平台),最小化移植 diff。
 schema_version: "2.0"
-name: v3_iort_learnable
-status: v3_learnable
+name: v5_static_randinit
+status: v5_random_init
 description: >
   Locked v2 scenario for the finite-K hierarchical aerial MEC port. 6 km x 6 km
   IoRT region, K=24 homogeneous UAVs (minor) + one low-altitude mobile compute
@@ -39,7 +39,7 @@ base:
 
 env:
   fleet_size_k:
-    value: 12
+    value: 16
     unit: UAVs
     source: v3_learnable
     rationale: fewer UAVs so the swarm cannot blanket the 6km field (coverage ~0.8x) and must concentrate on the hotspot -> positioning becomes load-bearing
@@ -87,9 +87,9 @@ env:
       source: spec_v2
       rationale: empty hub queue at reset
     cpu_frequency_hz:
-      value: 60000000000.0
+      value: 42000000000.0
       unit: Hz
-      source: v3_learnable
+      source: v4_static_phase1
       rationale: 60 GHz -> C_H = 15 Mbit/slot at c0=4000; moderate processing bottleneck (overload ~1.6x)
     static_power_w:
       value: 500.0
@@ -138,17 +138,24 @@ env:
       source: v3_learnable
       rationale: 120 Mbit buffer (x1.5); omega_Q auto-renormalizes by total capacity
     cpu_frequency_hz:
-      value: 2000000000.0
+      value: 1400000000.0
       unit: Hz
-      source: v3_learnable
+      source: v4_static_phase1
       rationale: 2 GHz -> C_U = 0.5 Mbit/slot; capable modern UAV compute, offloading still load-bearing
     initial_xy_m:
       generator: cluster
       cluster_frac: 0.10
-      center_frac: [0.42, 0.42]
+      center_frac: [0.85, 0.85]
       unit: m
       source: v3_learnable
       rationale: compact staging formation (side 0.10R=600m, mutual spacing 200m >> d_min=30m so zero initial collision penalty) parked at 0.42R, diagonally offset from the demand start (0.2R) by ~1.9 km. The gap is large enough that staying put (hover) fails badly (collects ~1.8 vs ~14 Mbit/slot, cost +68%) yet small enough that the hotspot edge is already within reach at slot 0 (nonzero accept gradient), so PPO has a learning signal to climb toward the demand instead of a dead sparse-reward zone
+    initial_deploy:
+      random_centroid: true
+      centroid_frac_range: [[0.3, 0.7], [0.3, 0.7]]
+      grid_side_m: 1000.0
+      unit: m
+      source: v5_random_init
+      rationale: per-episode random swarm centroid (= hub) in central box; 16 UAVs on a 4x4 grid over a 1km side around it; removes fixed-corner directional bias
     initial_queue_bits:
       value: 0.0
       unit: bits
@@ -193,12 +200,17 @@ demand:
       source: spec_v2
       rationale: log/visualization label
     initial_center_frac:
-      value: [0.2, 0.2]
+      value: [0.5, 0.5]
       unit: fraction_of_region
-      source: spec_v2
-      rationale: fixed start at (0.2R, 0.2R) each episode
+      source: v4_static_phase1
+      rationale: fallback centre; actual centre sampled per episode from the range below
+    initial_center_frac_range:
+      value: [[0.3, 0.7], [0.3, 0.7]]
+      unit: fraction_of_region
+      source: v4_static_phase1
+      rationale: per-episode hotspot centre ~ U([0.3,0.7]^2), a central box >=0.3R from every edge so the hotspot is never clipped and the policy must observe-then-deploy (not memorize)
     speed_mps:
-      value: 10.0
+      value: 0.0
       unit: m/s
       source: v3_learnable
       rationale: activity-core advance pace (a crowded-event / disaster-response hotspot drifts at a walking-to-slow-vehicle scale, ~36 km/h), well below V_U=40 and V_H=30 so the swarm and hub can track it
@@ -208,7 +220,7 @@ demand:
       source: spec_v2
       rationale: theta ~ U[0,2pi) drawn at reset from the env rng
     noise_std_m:
-      value: 20.0
+      value: 0.0
       unit: m
       source: v3_learnable
       rationale: per-slot N(0,20m) jitter = small fluctuation of the activity-core centroid, NOT teleportation; keeps drift coherent (~38% of motion is directed) so the hotspot is smoothly trackable and the demand-density shape is well-defined for matching
@@ -224,22 +236,22 @@ demand:
       source: spec_v2
       rationale: whole-field background + one broad drifting hotspot
     base_probability:
-      value: 0.00002
+      value: 0.00001
       unit: probability/slot
       source: spec_v2
       rationale: low background so the hotspot dominates (high contrast)
     hotspot_peak_increment:
-      value: 0.004
+      value: 0.008
       unit: probability/slot
       source: v3_learnable
       rationale: peak halved (0.008->0.004) to DECOUPLE far-field reach from load -- raising sigma to 1000 m alone would push offered to ~36 Mbit/slot (overload 1.7x); cutting the peak keeps offered ~20 (overload 1.0x) while the wider, lower hotspot still extends a usable demand gradient out to the staging point
     hotspot_sigma_m:
-      value: 1000.0
+      value: 600.0
       unit: m
       source: v3_learnable
       rationale: wider activity core so the demand density reaches the staging swarm ~1.9 km away -- far-field accept gradient at slot0 rises ~22% vs sigma=700, giving the policy a signal to be drawn toward the demand; paired with the halved peak so positioning stays load-bearing (heuristic-vs-hover cost gap +67%, not the v2 flat landscape) and the system is not re-overloaded
     clip_probability:
-      value: [0.0, 0.005]
+      value: [0.0, 0.01]
       unit: probability/slot
       source: manuscript
       rationale: preserves low-duty-cycle IoRT semantics
@@ -293,7 +305,7 @@ communication:
       source: manuscript
       rationale: fleet sweeps keep total access bandwidth fixed (per-UAV = W/K)
     total_bandwidth_hz:
-      value: 80000000.0
+      value: 320000000.0
       unit: Hz
       source: manuscript
       rationale: 80 MHz shared by the UAV access layer (FDMA across UAVs, OFDMA within cell)
