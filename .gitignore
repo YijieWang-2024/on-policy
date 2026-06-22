@@ -1,5 +1,7 @@
 __pycache__
 .DS_Store
+.idea/
+.pytest_cache/
 results
 *.pyc
 /gifs/
