@@ -207,33 +207,51 @@ onpolicy/scripts/results/MPE/<scenario>/<algorithm>/<experiment>/runN/gifs/rende
 `models/config.json` 保存这些参数；MEC 的评估和渲染脚本会在传入 `--model_dir`
 时自动读取该配置。命令行中显式传入的参数仍会覆盖保存配置。
 
-## MEC 环境(HAP/UAV，分层空中边缘计算）
+## MEC 环境(Hub/UAV，分层空中边缘计算）
 
-可移动算力中枢（major）+ K 架同构 UAV（minor）协同服务漂移的 IoRT 需求场，
-major-minor 共享参数 MAPPO（`onpolicy/algorithms/mec/mec_policy.py`）。完整设计与
-训练实证见 [`docs/mec_env_port_spec.md`](docs/mec_env_port_spec.md)。
+可移动空中算力中枢（major）+ K 架同构 UAV（minor）协同服务地面 IoRT workload field，
+major-minor 共享参数 MAPPO（`onpolicy/algorithms/mec/mec_policy.py`）。完整设计与历史
+诊断见 [`docs/mec_env_port_spec.md`](docs/mec_env_port_spec.md)，当前训练交接见
+[`HANDOFF.md`](HANDOFF.md)，换机器训练命令见 [`docs/mec_runbook.md`](docs/mec_runbook.md)。
 
-两个场景（`onpolicy/envs/mec/scenarios/`）：
+当前主线场景位于 `onpolicy/envs/mec/scenarios/v6_continuous_workload.yaml`：
 
-- `v2_iort_6km_mmwave`：锁定真源，物理方程与原仿真器逐步对拍的基准。**在该参数下，
-  由于几何过覆盖 + 重过载，UAV 定位对团队成本几乎无影响，RL 学不出 demand-matching**
-  （详见 spec §10）。
-- `v3_iort_learnable`：由 v2 派生的学习友好场景（K=12 + 算力×2 + 队列×1.5），使定位
-  成为承重决策。MAPPO 在此学出 demand-matching（W₁ 低于手工启发式）。
+- `v6_continuous_workload`：normalized continuous workload field + finite-K UAV
+  control。默认 `K=16`、`A_tot=150 Mbit/slot`、`zeta=0.70`、`sigma_h=700m`、
+  sub-6 access `W_ac_total=40MHz`、continuous 28GHz backhaul、`cycles_per_bit=500`。
+  训练前 probe 显示热点 UAV 最优数稳定落在 5-7，其余 UAV 覆盖背景。
+- `v2_iort_6km_mmwave`：锁定真源和数值对拍基准，保留但不作为学习主场景。
+- `v3_iort_learnable` / `v4_*` / `v5_static_randinit`：历史派生场景，用来记录从移动热点、
+  静态 inverse design、随机初始化到 v6 的诊断链。
 
-训练（CPU、K=12，约 1 小时 / 1.5e6 步）：
+训练前诊断（推荐先跑）：
 
 ```bash
-python -m onpolicy.scripts.train.train_mec --env_name MEC --algorithm_name mappo \
-  --mec_scenario v3_iort_learnable --seed 1 --n_rollout_threads 16 --episode_length 200 \
-  --num_env_steps 1500000 --ppo_epoch 5 --hidden_size 128 --layer_N 2 \
-  --use_entropy_anneal --entropy_coef 0.003 --mec_logstd_init -1.9 --use_wandb --cuda
+PYTHONPATH=$PWD python -m onpolicy.scripts.analysis.design_v6_sanity
+```
+
+训练模板（GPU 机器上不要传 `--cuda`；传 `--use_wandb` 表示使用本地 TensorBoard）：
+
+```bash
+PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
+  --env_name MEC --algorithm_name mappo \
+  --experiment_name v6_continuous_seed1 \
+  --mec_scenario v6_continuous_workload \
+  --seed 1 \
+  --n_rollout_threads 16 --n_training_threads 6 \
+  --episode_length 200 --num_env_steps 1500000 \
+  --ppo_epoch 5 --num_mini_batch 1 \
+  --hidden_size 128 --layer_N 2 \
+  --use_entropy_anneal --mec_logstd_init -1.9 --entropy_coef 0.003 \
+  --lr 5e-4 --critic_lr 5e-4 --gamma 0.99 \
+  --log_interval 5 --save_interval 25 \
+  --use_wandb
 ```
 
 MEC 专用参数：`--mec_scenario`、`--mec_fleet_size`（覆盖 K）、`--mec_logstd_init`
-（高斯速度头初始 logstd，默认 -1.9 → σ≈0.15，避免满速乱窜）、`--use_entropy_anneal`
-（熵系数线性退火）。评测用 `onpolicy.scripts.eval.eval_mec`（policy / heuristic /
-hover / random 对比 W₁、成本份额、中枢消融）。
+（高斯速度头初始 logstd，默认 -1.9 → σ≈0.15）、`--use_entropy_anneal`（熵系数线性退火）。
+训练后不能只看 W₁；还要看 hotspot/background UAV 数、accepted workload、source-loss
+decomposition、overflow、access/backhaul/compute utilization 和 hub-to-hotspot distance。
 
 ## 测试
 

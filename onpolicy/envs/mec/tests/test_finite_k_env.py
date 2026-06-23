@@ -184,6 +184,53 @@ def test_backhaul_60ghz_service_circle():
     assert rates[3] == 0.0 and rates[4] == 0.0  # outside ~2.2 km circle
 
 
+def test_v6_continuous_workload_and_backhaul_smoke():
+    cfg = load_scenario("v6_continuous_workload")
+    env = FiniteKHAPUAVMECEnv(cfg)
+    obs, _ = env.reset(seed=SEED)
+    density, fresh = env._demand_density(obs["demand"]["hotspot_center_m"])
+    total = float(cfg["demand"]["workload_field"]["total_workload_bits_per_slot"])
+    np.testing.assert_allclose(np.sum(density) * env.cell_area, total, rtol=1e-12)
+    np.testing.assert_allclose(density, fresh, rtol=0, atol=0)
+
+    hub = np.array([3000.0, 3000.0])
+    horiz = np.array([0.0, 1000.0, 3000.0, 6000.0])
+    uav_xy = np.stack([hub[0] + horiz, np.full_like(horiz, hub[1])], axis=1)
+    rates = env._backhaul_rate(hub, uav_xy)
+    assert np.all(rates > 0.0)
+    assert rates[0] > rates[1] > rates[2] > rates[3]
+
+    k = cfg["env"]["fleet_size_k"]
+    null = {"hap_velocity_mps": np.zeros(2), "uav_velocity_mps": np.zeros((k, 2)),
+            "beta": np.zeros(k)}
+    _, reward, terminated, truncated, info = env.step(null)
+    assert terminated is False and truncated is False
+    assert math.isfinite(reward)
+    assert info["phi_sum_error"] < 1e-6
+    diag = info["access_diagnostics"]
+    hot = diag["regions"]["hotspot"]
+    bg = diag["regions"]["background"]
+    np.testing.assert_allclose(info["A_i"] + info["source_loss_uav_bits"],
+                               info["A_dem_i"], rtol=1e-12, atol=1e-6)
+    np.testing.assert_allclose(
+        info["source_loss_outside_bits"] + info["source_loss_capacity_bits"],
+        info["U_src"], rtol=1e-12, atol=1e-6)
+    np.testing.assert_allclose(
+        hot["offered_bits"] + bg["offered_bits"],
+        cfg["demand"]["workload_field"]["total_workload_bits_per_slot"],
+        rtol=1e-12, atol=1e-6)
+    np.testing.assert_allclose(
+        hot["accepted_bits"] + bg["accepted_bits"], np.sum(info["A_i"]),
+        rtol=1e-12, atol=1e-6)
+    np.testing.assert_allclose(
+        hot["source_bits"] + bg["source_bits"], info["U_src"],
+        rtol=1e-12, atol=1e-6)
+    assert 0.0 <= diag["eta_p05"] <= diag["eta_p50"] <= diag["eta_p95"]
+    assert diag["n_hotspot_uav"] + diag["n_background_uav"] == k
+    assert 0.0 <= float(np.sum(info["A_i"])) <= total
+    assert 0.0 <= info["U_src"] <= total + 1e-6
+
+
 def test_cost_components_and_split():
     env, cfg, _ = _port_env()
     w = cfg["cost"]["weights"]

@@ -96,6 +96,10 @@ def derive_constants(cfg: dict[str, Any]) -> dict[str, float]:
     g_th = noise_eff_w_per_hz * float(access["snr_threshold_linear"]) / user_psd
 
     w_beam = float(mmw["beam_bandwidth_hz"])
+    bh_alpha = float(mmw.get("pathloss_exponent", 2.0))
+    bh_kappa = float(mmw.get("kappa_o2_db_per_km", 0.0))
+    bh_cutoff = bool(mmw.get("use_hard_cutoff", True))
+    bh_demod = float(mmw.get("demod_snr_min_db", -math.inf))
     # SNR_dB(d) = bh_link_budget_const_db - 20log10(d) - kappa_o2*(d/1000)
     fspl_const_db = 20.0 * math.log10(float(mmw["carrier_frequency_hz"])) + 20.0 * math.log10(
         4.0 * math.pi / 2.99792458e8)
@@ -113,8 +117,10 @@ def derive_constants(cfg: dict[str, Any]) -> dict[str, float]:
         "uav_compute_capacity_bits": float(env["uav"]["cpu_frequency_hz"]) * delta / cycles_per_bit,
         "hap_compute_capacity_bits": float(env["hap"]["cpu_frequency_hz"]) * delta / cycles_per_bit,
         "bh_link_budget_const_db": bh_const_db,
-        "bh_kappa_o2_db_per_km": float(mmw["kappa_o2_db_per_km"]),
-        "bh_demod_snr_min_db": float(mmw["demod_snr_min_db"]),
+        "bh_pathloss_exponent": bh_alpha,
+        "bh_kappa_o2_db_per_km": bh_kappa,
+        "bh_demod_snr_min_db": bh_demod,
+        "bh_use_hard_cutoff": bh_cutoff,
         "bh_beam_bandwidth_hz": w_beam,
     }
 
@@ -151,12 +157,15 @@ def access_coverage_radius_m(cfg: dict[str, Any]) -> float:
 
 def backhaul_service_radius_m(cfg: dict[str, Any]) -> float:
     """Horizontal radius where beam SNR crosses the demod threshold (analysis aid)."""
+    if not cfg["derived"].get("bh_use_hard_cutoff", True):
+        return math.inf
     d = cfg["derived"]
     dz = float(cfg["env"]["hap"]["altitude_m"]) - float(cfg["env"]["uav"]["altitude_m"])
 
     def snr_db(horiz: float) -> float:
         dist = math.hypot(horiz, dz)
-        return (d["bh_link_budget_const_db"] - 20.0 * math.log10(dist)
+        return (d["bh_link_budget_const_db"]
+                - 10.0 * float(d.get("bh_pathloss_exponent", 2.0)) * math.log10(dist)
                 - d["bh_kappa_o2_db_per_km"] * dist / 1000.0)
 
     lo, hi = 0.0, 50000.0
@@ -175,8 +184,8 @@ def validate_scenario(cfg: dict[str, Any]) -> None:
         raise ValueError("uav.initial_xy_m length must equal fleet_size_k")
     if len(uav["initial_queue_bits"]) != k:
         raise ValueError("uav.initial_queue_bits length must equal fleet_size_k")
-    if cfg["communication"]["backhaul"]["link_model"] != "mmwave_beam":
-        raise ValueError("v2 loader only supports backhaul.link_model=mmwave_beam")
+    if cfg["communication"]["backhaul"]["link_model"] not in {"mmwave_beam", "continuous_mmwave"}:
+        raise ValueError("MEC loader supports backhaul.link_model=mmwave_beam or continuous_mmwave")
     proc = cfg["demand"]["process"]
     if proc["model"] != "random_walk_hotspot":
         raise ValueError("v2 loader only supports demand.process.model=random_walk_hotspot")
@@ -264,6 +273,13 @@ def _apply_bandwidth_derivation(cfg: dict[str, Any]) -> None:
         access["bandwidth_per_uav_hz"] = float(access["total_bandwidth_hz"]) / float(
             cfg["env"]["fleet_size_k"])
         access["bandwidth_allocation"] = "fixed_total"
+    bh = cfg["communication"].get("backhaul", {})
+    mmw = bh.get("mmwave", {})
+    if mmw.get("bandwidth_allocation") == "fixed_total" or (
+            "total_bandwidth_hz" in mmw and "beam_bandwidth_hz" not in mmw):
+        mmw["beam_bandwidth_hz"] = float(mmw["total_bandwidth_hz"]) / float(
+            cfg["env"]["fleet_size_k"])
+        mmw["bandwidth_allocation"] = "fixed_total"
 
 
 def _derive_normalization(cfg: dict[str, Any]) -> dict[str, Any]:

@@ -104,6 +104,10 @@ class MECEnv:
         uav_xy = np.asarray(info["uav_xy_m"], float)
         center = np.asarray(info["demand_center_m"], float)
         w1 = demand_matching_w1(uav_xy, self.env.grid_xy, self.env._demand_density(center)[0])
+        diag = info.get("access_diagnostics", {})
+        regions = diag.get("regions", {})
+        hot = regions.get("hotspot", {})
+        bg = regions.get("background", {})
         cost = {
             "training_cost": info.get("training_cost"),
             "src_cost": info.get("src_cost_component"),
@@ -114,6 +118,22 @@ class MECEnv:
             "accepted": float(np.sum(info.get("A_i", 0.0))),
             "offloaded": float(np.sum(info.get("B_i", 0.0))),
             "overflow": float(np.sum(info.get("D_i_U", 0.0))) + float(info.get("D_H", 0.0)),
+            "source_outside": float(info.get("source_loss_outside_bits", 0.0)),
+            "source_capacity": float(info.get("source_loss_capacity_bits", 0.0)),
+            "hotspot_offered": float(hot.get("offered_bits", 0.0)),
+            "hotspot_accepted": float(hot.get("accepted_bits", 0.0)),
+            "hotspot_source": float(hot.get("source_bits", 0.0)),
+            "background_offered": float(bg.get("offered_bits", 0.0)),
+            "background_accepted": float(bg.get("accepted_bits", 0.0)),
+            "background_source": float(bg.get("source_bits", 0.0)),
+            "eta_p05": float(diag.get("eta_p05", 0.0)),
+            "eta_p50": float(diag.get("eta_p50", 0.0)),
+            "eta_p95": float(diag.get("eta_p95", 0.0)),
+            "eta_served": float(diag.get("eta_served_workload_weighted", 0.0)),
+            "eta_all": float(diag.get("eta_all_workload_weighted", 0.0)),
+            "n_hotspot_uav": float(diag.get("n_hotspot_uav", 0.0)),
+            "n_background_uav": float(diag.get("n_background_uav", 0.0)),
+            "hub_to_hotspot": float(diag.get("hub_to_hotspot_m", 0.0)),
             "w1": float(w1),
         }
         infos = [{"individual_reward": reward} for _ in range(self.num_agents)]

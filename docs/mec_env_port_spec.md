@@ -37,6 +37,15 @@
 > (eval W₁ 733m < 启发式 763 < hover 830 < random 1155;成本 0.509 ≈ 启发式、胜 hover 24%;中枢消融 +27.9%;详见 §10.3,含 log-prob 修复 + entropy 0.003)。
 > **v2 仍作为锁定真源与数值对拍基准保留不变;v3 是面向"可学习"的派生场景。**
 
+> **⚠️ 2026-06-23 训练前主线更新(详见 §12)**:v4/v5 的静态 inverse design 解决了移动热点和固定
+> 起点偏差,但 v5 暴露"全员挤热点"。当前主线已更新为
+> `v6_continuous_workload`:直接使用 normalized continuous workload field,取消 finite-device
+> probability/packet 脚手架;接入为 40MHz sub-6 聚合频谱池;回传为 28GHz continuous Shannon
+> rate 且无 hard cutoff;计算强度为 500 cycles/bit。训练前 probe 不再使用固定 `eta_ref` 作为
+> 核心依据,而是输出真实信道积分得到的 capacity、频谱效率分位数、source-loss decomposition、
+> hotspot/background accepted workload 和 utilization。v6 当前状态是"可进入训练的候选主场景",
+> 最终参数仍需训练结果确认。
+
 **卖点**(方法主导):finite-K 无损测度值重构 + Wasserstein descriptor 误差界 + SetRec-MAPPO,
 testbed = 上述「可动算力中枢 + 可扩展 UAV 群」二层 MEC(查新无人凑齐,见 §7)。
 
@@ -475,17 +484,159 @@ C_U=0.35(f_U=1.4GHz)、C_H=10.5(f_H=42GHz)、access total_bandwidth=320MHz(×4 �
 | U_src | 4.0 | **1.27** | 3.2 |
 | ovf | ≈0 | **0** | — |
 
-### 11.5 当前卡点与下一步
+### 11.5 当前卡点与下一步(历史记录,已被 v6 取代)
 
 **全员挤热点的根因**:配方[C] 的 n*=5 谷底在 access×4 下很浅(n=3~5 cost≈0.12);接入充
 裕时堆第 6/7 架到热点的边际速率不衰减 → 最优滑向"全堆"。
 
-**下一步(已定)**:
-- 把接入从 320MHz 调回物理值 **80MHz**(正交 W/K,各 UAV 不复用不引干扰);
-- 用 `phase1_design.py` 在 80MHz 下重算 n*,确认谷底足够深(热点第 6 架边际 < 背景
-  第 1 架边际)后重训;
-- 验收必看 `v5_viz.py` 分布图 + `v5_dist_check.py` 计数(目标:~5 热点 + ~11 背景 + hub 到热点≈0)。
+**当时的下一步设想**是把接入从 320MHz 调回 80MHz,继续沿 v5 的 finite-device probability
+脚手架修正全员挤热点。但后续审查认为问题不只是某个带宽数值,而是接入、回传、计算和 workload
+四个层级尺度没有统一校准。因此这条路线已被 §12 的 v6 continuous workload redesign 取代。
 
 **注意约束**:接入保持正交(不复用、不引干扰)。全频复用 SINR 干扰模型试过,干扰过大
 (1→2 架速率暴跌 10×),已撤回正交。
 
+---
+
+## 12. v6 Continuous Workload Redesign(2026-06-23)
+
+### 12.1 设计目标
+
+v6 的目标不是继续微调 v5 的 `base_probability`、`hotspot_peak_increment` 和 packet size,
+而是把系统统一到:
+
+```text
+continuous workload field + finite-K UAV control
+```
+
+地面侧直接定义 `lambda(omega, Z_t)` [bits/(m^2 slot)],并保证:
+
+```text
+int_W lambda(omega, Z_t) d omega = A_tot
+```
+
+这样 workload 总量、热点占比和热点宽度都可解释,不再从"设备密度 x 产包概率 x 单包大小"间接推导。
+
+### 12.2 当前默认参数
+
+| 模块 | 参数 | v6 默认值 | 说明 |
+|---|---|---:|---|
+| 区域 | `Lx, Ly` | 6 km, 6 km | 区域级空中 MEC |
+| 平台 | `K` | 16 | 4x4 UAV 群体 |
+| 高度 | `H_U, H_H` | 300 m, 1.5 km | hub 称 mobile aerial computing hub |
+| workload | `A_tot` | 150 Mbit/slot | 训练主候选中高负载 |
+| workload | `zeta` | 0.70 | 70% 热点,30% 背景 |
+| workload | `sigma_h` | 700 m | 6km 区域内的中等热点宽度 |
+| 接入 | `W_ac_total` | 40 MHz | conservative sub-6 access pool |
+| 接入 | `W_ac_i` | 2.5 MHz | K=16 时每 UAV 聚合频谱池 |
+| 接入 | `p0` | 1e-8 W/Hz | low-power IoRT effective PSD |
+| 接入 | `gamma_ref` | 8 dB | service-attractiveness reference,不是 hard threshold |
+| 接入 | `tau` | 0.2 | sharp but continuous service share |
+| 回传 | `f_bh` | 28 GHz | continuous mmWave backhaul |
+| 回传 | `W_bh_total` | 400 MHz | 25 MHz/UAV |
+| 回传 | `P_UH` | 27 dBm | UAV 回传发射功率 |
+| 回传 | effective gain | 15 dB | 吸收 beamforming gains、fixed losses、link margin |
+| 回传 | hard cutoff | no | 速率连续下降 |
+| 计算 | `cycles_per_bit` | 500 | 默认计算强度 |
+| 计算 | `F_U, F_H` | 2 GHz/UAV,45 GHz | offered compute ratio ~=0.97 |
+
+### 12.3 接入层公式口径
+
+接入实际频谱效率随 UAV 布局、hotspot 位置、service share 和信道实时变化。固定 `eta_ref`
+只能作为粗 debug,不能作为参数合理性的核心证据。
+
+v6 使用:
+
+```text
+eta_i(omega,t) = log2(1 + p0 * gbar(omega, x_i(t)) / N0)
+
+A_i^dem(t) = int_W phi_i^tau(omega|x(t)) lambda(omega,Z_t) d omega
+
+eta_bar_i(t) =
+  int_W phi_i^tau lambda eta_i d omega / (A_i^dem(t) + eps)
+
+R_i^ac(t) = W_i^ac * eta_bar_i(t)
+```
+
+`gamma_ref` 只用于归一化 service attractiveness:
+
+```text
+g_ref = N0 * gamma_ref / p0
+psi_i = gbar_i / g_ref
+```
+
+它不是"低于 8dB 不能接入"的 hard mask。
+
+### 12.4 闭环数据流
+
+每个 slot 的数据流为:
+
+```text
+lambda(omega,Z_t)
+  -> A_i^dem(t)
+  -> A_i^acc(t)
+  -> Q_i(t)
+  -> local compute / backhaul
+  -> Q_H(t)
+  -> hub compute
+```
+
+v6 诊断显式区分:
+
+- `source_loss_outside_bits`:outside option/service attractiveness 导致未进入 UAV 层;
+- `source_loss_capacity_bits`:进入 UAV 服务份额后受接入容量限制未被接纳;
+- hotspot/background offered、accepted、source、outside、capacity split;
+- actual `eta` 的 served-weighted/all-workload weighted mean 和 p05/p50/p95;
+- access/backhaul rates 与 utilization;
+- UAV/hub compute utilization;
+- `n_hotspot_uav`, `n_background_uav`, `hub_to_hotspot_m`。
+
+### 12.5 训练前 probe 结果
+
+脚本:
+
+```bash
+PYTHONPATH=$PWD python -m onpolicy.scripts.analysis.design_v6_sanity
+```
+
+当前本机结果摘要:
+
+```text
+K=16  A_tot=150.0 Mbit/slot  zeta=0.70
+W_ac_i=2.500 MHz
+W_bh_i=25.000 MHz
+offered_compute_ratio=0.97
+best n_hot counts over 32 centers: {5: 14, 6: 10, 7: 8}
+```
+
+关键 rows:
+
+```text
+* n_hot=5:  acc=125.7M  src=24.3M(out=15.8M, cap=8.4M)  util=0.56
+  n_hot=6:  acc=125.4M  src=24.6M(out=19.1M, cap=5.5M)  util=0.55
+  n_hot=7:  acc=122.9M  src=27.1M(out=22.7M, cap=4.4M)  util=0.53
+  n_hot=16: acc=104.0M  src=46.0M(out=46.0M, cap=0.0M)  util=0.38
+```
+
+结论:
+
+- v6 不要求"刚好 5 架",而是希望热点 UAV 数大多落在 5-7;
+- 全员挤热点虽然总 access capacity 高,但背景 workload 大量进入 outside option,accepted workload 更低;
+- 当前 access utilization 约 0.5-0.6,说明接入没有过度富裕,但默认场景也不是纯带宽饱和;
+- source loss 需要分 outside 和 capacity 两类解释;
+- hub 偏移 3km 时 backhaul utilization 上升并出现少量 overflow,说明回传几何承重但不是 hard cutoff。
+
+### 12.6 训练验收
+
+v6 可以进入下一轮训练,但训练后必须用诊断指标确认。验收不只看 reward/W1:
+
+- 热点 UAV 数多数在 5-7,背景 UAV 数约 9-11;
+- `accepted` 不靠少接纳偷懒,`U_src` 和 `overflow` 不爆;
+- hotspot/background accepted workload 都有实质贡献;
+- `source_outside` 和 `source_capacity` 处于可解释范围;
+- access/backhaul/UAV compute/hub compute utilization 都在合理量级;
+- hub 偏移或冻结会降低性能;
+- W1、空间热图、UAV 分布计数和系统吞吐指标一致。
+
+如果训练后仍然全员挤热点,优先审查 reward、探索、策略表达和动态训练轨迹,不要直接继续微调
+`A_tot` 或 `W_ac_total`。

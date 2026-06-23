@@ -1,5 +1,80 @@
 # Work Notes
 
+## 2026-06-23 - v6 continuous workload scenario and training-preflight diagnostics
+
+### Summary
+
+Completed the pre-training environment redesign for the MEC task. The current main
+candidate is **`v6_continuous_workload`**: a normalized continuous workload field
+with finite-K UAV control, continuous 28 GHz backhaul, conservative sub-6 access,
+and calibrated compute capacity. This is now ready to move to a stronger machine
+for training; the local machine was used only for probes and unit tests.
+
+### Key changes
+
+- Replaced the finite-device scaffold (`base_probability`, hotspot peak increment,
+  packet size, per-device bandwidth) with direct workload density
+  `lambda(omega, Z_t)` in bits/(m^2 slot). The total fresh workload is controlled by
+  `A_tot=150 Mbit/slot`, with `zeta=0.70` in the hotspot and `sigma_h=700 m`.
+- Set the access layer to a conservative `W_ac_total=40 MHz` pool, i.e.
+  `2.5 MHz/UAV` for `K=16`. Access uses fixed effective PSD `p0=1e-8 W/Hz`,
+  `gamma_ref=8 dB` as a service-attractiveness reference, and `tau=0.2`.
+- Switched backhaul to continuous 28 GHz Shannon rate with no hard SNR cutoff:
+  `W_bh_total=400 MHz`, `25 MHz/UAV`, `P_UH=27 dBm`, and an effective gain of 15 dB.
+  This gain must be explained as beamforming gain plus fixed implementation losses,
+  not as a bare antenna-gain number.
+- Rebalanced compute to `cycles_per_bit=500`, `F_U=2 GHz/UAV`, `F_H=45 GHz`, so
+  offered compute load is `150e6 * 500 / (16*2e9 + 45e9) ~= 0.97`.
+- Added diagnostic info for source-loss decomposition, hotspot/background
+  offered/accepted/source, real access spectral-efficiency percentiles, access and
+  backhaul rates, compute/backhaul utilization, UAV hotspot/background counts, and
+  hub-to-hotspot distance.
+- Added `onpolicy/scripts/analysis/design_v6_sanity.py`, a training-preflight probe
+  that uses true signal integration rather than a fixed reference spectral efficiency.
+
+### Probe result
+
+The v6 deploy-and-hold probe over 32 random hotspot centers reports:
+
+```text
+best n_hot counts over 32 centers: {5: 14, 6: 10, 7: 8}
+```
+
+Representative aggregate rows:
+
+```text
+* n_hot=5: accepted=125.7M, source=24.3M(out=15.8M, cap=8.4M), util=0.56
+  n_hot=6: accepted=125.4M, source=24.6M(out=19.1M, cap=5.5M), util=0.55
+  n_hot=7: accepted=122.9M, source=27.1M(out=22.7M, cap=4.4M), util=0.53
+  n_hot=16: accepted=104.0M, source=46.0M(out=46.0M, cap=0.0M), util=0.38
+```
+
+The main conclusion is not "exactly five UAVs", but rather a stable 5-7 hotspot
+UAV regime with the rest covering background workload. Full hotspot crowding is now
+a clear static loss because background workload falls into the outside option.
+
+### Verification
+
+```bash
+PYTHONPATH=/Users/qiaonan/Projects/on-policy /opt/anaconda3/envs/marl/bin/python -m pytest \
+  onpolicy/envs/mec/tests/test_config_loader.py \
+  onpolicy/envs/mec/tests/test_finite_k_env.py \
+  onpolicy/algorithms/mec/tests/test_mec_policy.py -q
+# 17 passed, 1 skipped, 1 warning
+
+PYTHONPATH=/Users/qiaonan/Projects/on-policy /opt/anaconda3/envs/marl/bin/python -m compileall -q \
+  onpolicy/envs/mec onpolicy/scripts/analysis/design_v6_sanity.py
+
+git diff --check
+```
+
+### Next step
+
+Run training for `v6_continuous_workload` on a stronger machine. Keep diagnostic
+logging enabled and judge success by hotspot/background counts, source-loss
+decomposition, accepted workload, overflow, access/backhaul/compute utilization,
+hub geometry, and W1 together. Do not use W1 alone.
+
 ## 2026-06-17 - Static demand inverse design, v4/v5 scenarios, random initialization
 
 ### Summary

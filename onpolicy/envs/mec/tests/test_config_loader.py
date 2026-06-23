@@ -98,6 +98,27 @@ def test_mmwave_link_budget_key_points():
     assert cfg["env"]["region"]["lx_m"] > 2.0 * radius
 
 
+def test_v6_continuous_workload_scenario_sanity():
+    cfg = load_scenario("v6_continuous_workload")
+    assert cfg["env"]["fleet_size_k"] == 16
+    assert cfg["communication"]["backhaul"]["link_model"] == "continuous_mmwave"
+    assert cfg["demand"]["workload_field"]["model"] == "normalized_background_gaussian"
+    assert abs(cfg["communication"]["access"]["bandwidth_per_uav_hz"] - 40e6 / 16) < 1e-6
+    assert abs(cfg["communication"]["backhaul"]["mmwave"]["beam_bandwidth_hz"] - 400e6 / 16) < 1e-6
+    assert abs(cfg["derived"]["uav_compute_capacity_bits"] - 4.0e6) < 1e-6
+    assert abs(cfg["derived"]["hap_compute_capacity_bits"] - 90.0e6) < 1e-6
+    assert math.isinf(backhaul_service_radius_m(cfg))
+
+    field = cfg["demand"]["workload_field"]
+    a_tot = float(field["total_workload_bits_per_slot"])
+    assert abs(a_tot - 150e6) < 1e-6
+    assert 0.6 <= float(field["hotspot_fraction"]) <= 0.75
+    f_total = (cfg["env"]["fleet_size_k"] * float(cfg["env"]["uav"]["cpu_frequency_hz"])
+               + float(cfg["env"]["hap"]["cpu_frequency_hz"]))
+    offered_compute_ratio = float(cfg["compute"]["cycles_per_bit"]) * a_tot / f_total
+    assert 0.9 <= offered_compute_ratio <= 1.05
+
+
 def test_validation_rejects_hardcoded_weights():
     cfg = load_scenario()
     cfg["cost"]["weights"]["omega_ovf_per_bit"] *= 1.5

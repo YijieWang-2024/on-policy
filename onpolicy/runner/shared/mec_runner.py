@@ -22,8 +22,15 @@ class MECRunner(MPERunner):
 
     def log_env(self, env_infos, total_num_steps):
         """Also surface team MEC metrics (carried on the major agent's info slot)."""
-        keys = ("training_cost", "src_cost", "ovf_cost", "queue_cost",
-                "energy_cost", "accepted", "offloaded", "overflow", "U_src", "w1")
+        keys = (
+            "training_cost", "src_cost", "ovf_cost", "queue_cost",
+            "energy_cost", "accepted", "offloaded", "overflow", "U_src",
+            "source_outside", "source_capacity",
+            "hotspot_offered", "hotspot_accepted", "hotspot_source",
+            "background_offered", "background_accepted", "background_source",
+            "eta_p05", "eta_p50", "eta_p95", "eta_served", "eta_all",
+            "n_hotspot_uav", "n_background_uav", "hub_to_hotspot", "w1",
+        )
         for key in keys:
             vals = []
             for info in getattr(self, "_last_infos", []):
@@ -53,8 +60,10 @@ class MECRunner(MPERunner):
         share = lambda k: 100.0 * m(k) / total if total else float("nan")
         print(
             f"  [mec] accept={accept_rate:4.1f}%  accepted={acc/1e6:5.1f}  "
-            f"ovf={m('overflow')/1e6:4.1f}  U_src={usrc/1e6:5.1f} Mbit/slot  "
-            f"W1={m('w1'):6.0f} m  | shares src={share('src_cost'):3.0f}% "
+            f"ovf={m('overflow')/1e6:4.1f}  U_src={usrc/1e6:5.1f} "
+            f"(out={m('source_outside')/1e6:4.1f}, cap={m('source_capacity')/1e6:4.1f})  "
+            f"n_hot={m('n_hotspot_uav'):4.1f}  hub={m('hub_to_hotspot'):5.0f}m  "
+            f"W1={m('w1'):6.0f}m  | shares src={share('src_cost'):3.0f}% "
             f"ovf={share('ovf_cost'):3.0f}% q={share('queue_cost'):3.0f}% "
             f"e={share('energy_cost'):3.0f}%"
         )

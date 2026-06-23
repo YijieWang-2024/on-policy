@@ -119,18 +119,29 @@ class FiniteKHAPUAVMECEnv:
         active_density, fresh_density = self._demand_density(st.demand_center_m)
         access_gain = self._access_gain(service_uav_xy)
         phi0, phi = self._service_share(access_gain)
-        n_srv = np.sum(phi * active_density[None, :], axis=1) * self.cell_area
         outside_loss = float(np.sum(phi0 * fresh_density) * self.cell_area)
-
-        access_rate = self._access_rate(access_gain, n_srv)
-        b0 = float(self.cfg["demand"]["packet_size_bits"])
-        accepted = np.sum(
-            phi * active_density[None, :] * np.minimum(b0, self.delta * access_rate),
-            axis=1) * self.cell_area
-        source_loss_uav = np.sum(
-            phi * active_density[None, :] * np.maximum(b0 - self.delta * access_rate, 0.0),
-            axis=1) * self.cell_area
+        if self._uses_continuous_workload():
+            demand_i = np.sum(phi * fresh_density[None, :], axis=1) * self.cell_area
+            access_rate = self._continuous_access_rate(access_gain, phi, fresh_density, demand_i)
+            accepted = np.minimum(demand_i, self.delta * access_rate)
+            source_loss_uav = np.maximum(demand_i - accepted, 0.0)
+            n_srv = demand_i
+        else:
+            n_srv = np.sum(phi * active_density[None, :], axis=1) * self.cell_area
+            access_rate = self._access_rate(access_gain, n_srv)
+            b0 = float(self.cfg["demand"]["packet_size_bits"])
+            accepted = np.sum(
+                phi * active_density[None, :] * np.minimum(b0, self.delta * access_rate),
+                axis=1) * self.cell_area
+            source_loss_uav = np.sum(
+                phi * active_density[None, :] * np.maximum(b0 - self.delta * access_rate, 0.0),
+                axis=1) * self.cell_area
+            demand_i = accepted + source_loss_uav
         source_loss = float(outside_loss + np.sum(source_loss_uav))
+        access_diag = self._access_diagnostics(
+            st.demand_center_m, service_hap_xy, service_uav_xy,
+            fresh_density, phi0, phi, access_gain, access_rate,
+            demand_i, accepted, source_loss_uav)
 
         backhaul_rate = self._backhaul_rate(service_hap_xy, service_uav_xy)
         c_u = float(self.cfg["derived"]["uav_compute_capacity_bits"])
@@ -173,6 +184,7 @@ class FiniteKHAPUAVMECEnv:
             "D_H": d_h,
             "U_src": source_loss,
             "source_loss_outside_bits": outside_loss,
+            "source_loss_capacity_bits": float(np.sum(source_loss_uav)),
             "source_loss_uav_bits": source_loss_uav,
             "uav_energy_j": uav_energy,
             "hap_energy_j": hap_energy,
@@ -192,6 +204,9 @@ class FiniteKHAPUAVMECEnv:
             "demand_velocity_mps": st.demand_velocity_mps.copy(),
             "backhaul_rate_bps": backhaul_rate,
             "backhaul_in_range": backhaul_rate > 0.0,
+            "access_rate_bps": access_rate,
+            "A_dem_i": demand_i,
+            "access_diagnostics": access_diag,
             "n_srv": n_srv,
         }
         truncated = self.enforce_horizon and self.state.step_index >= self.horizon
@@ -274,6 +289,17 @@ class FiniteKHAPUAVMECEnv:
 
     def _demand_density(self, center: np.ndarray):
         demand = self.cfg["demand"]
+        field = demand.get("workload_field")
+        if field is not None and field.get("model") == "normalized_background_gaussian":
+            dist2 = np.sum((self.grid_xy - center) ** 2, axis=1)
+            sigma = float(field["hotspot_sigma_m"])
+            hot = np.exp(-dist2 / (2.0 * sigma**2))
+            hot_norm = np.sum(hot) * self.cell_area
+            area = self.lx * self.ly
+            total = float(field["total_workload_bits_per_slot"])
+            zeta = float(field["hotspot_fraction"])
+            density = total * ((1.0 - zeta) / area + zeta * hot / max(hot_norm, self.eps))
+            return density, density
         rho = float(demand["device_density"]["rho_g_devices_per_m2"])
         ap = demand["activity_probability"]
         dist2 = np.sum((self.grid_xy - center) ** 2, axis=1)
@@ -282,6 +308,10 @@ class FiniteKHAPUAVMECEnv:
         p = np.clip(p, float(ap["clip_probability"][0]), float(ap["clip_probability"][1]))
         active = rho * p
         return active, float(demand["packet_size_bits"]) * active
+
+    def _uses_continuous_workload(self) -> bool:
+        field = self.cfg["demand"].get("workload_field")
+        return bool(field and field.get("model") == "normalized_background_gaussian")
 
     # ------------------------------------------------ actions & kinematics
 
@@ -344,6 +374,100 @@ class FiniteKHAPUAVMECEnv:
             self.cfg["derived"]["noise_psd_eff_w_per_hz"])
         return per_device_bw[:, None] * np.log2(1.0 + snr)
 
+    def _continuous_access_rate(
+            self, access_gain: np.ndarray, phi: np.ndarray,
+            workload_density: np.ndarray, demand_i: np.ndarray):
+        access = self.cfg["communication"]["access"]
+        bandwidth = float(access["bandwidth_per_uav_hz"])
+        snr = float(access["user_target_psd_w_per_hz"]) * access_gain / float(
+            self.cfg["derived"]["noise_psd_eff_w_per_hz"])
+        eta = np.log2(1.0 + snr)
+        weights = phi * workload_density[None, :]
+        numerator = np.sum(weights * eta, axis=1) * self.cell_area
+        eta_bar = numerator / np.maximum(demand_i, self.eps)
+        return bandwidth * eta_bar
+
+    def _access_diagnostics(
+            self, center: np.ndarray, hap_xy: np.ndarray, uav_xy: np.ndarray,
+            fresh_density: np.ndarray, phi0: np.ndarray, phi: np.ndarray,
+            access_gain: np.ndarray, access_rate: np.ndarray, demand_i: np.ndarray,
+            accepted: np.ndarray, source_loss_uav: np.ndarray) -> dict[str, Any]:
+        """Scalar diagnostics for source-loss anatomy and spatial service quality."""
+        total_workload = float(np.sum(fresh_density) * self.cell_area)
+        assigned = phi * fresh_density[None, :]
+        outside_density = phi0 * fresh_density
+        demand_safe = np.maximum(demand_i, self.eps)
+        accepted_density = assigned * (accepted / demand_safe)[:, None]
+        capacity_source_density = assigned * (source_loss_uav / demand_safe)[:, None]
+
+        sigma = self._hotspot_sigma_m()
+        dist_grid = np.linalg.norm(self.grid_xy - center[None, :], axis=1)
+        masks = {
+            "hotspot": dist_grid <= 1.5 * sigma,
+            "background": dist_grid > 1.5 * sigma,
+        }
+        regions: dict[str, dict[str, float]] = {}
+        for name, mask in masks.items():
+            offered = float(np.sum(fresh_density[mask]) * self.cell_area)
+            outside = float(np.sum(outside_density[mask]) * self.cell_area)
+            cap_src = float(np.sum(capacity_source_density[:, mask]) * self.cell_area)
+            acc = float(np.sum(accepted_density[:, mask]) * self.cell_area)
+            regions[name] = {
+                "offered_bits": offered,
+                "accepted_bits": acc,
+                "source_bits": outside + cap_src,
+                "source_outside_bits": outside,
+                "source_capacity_bits": cap_src,
+            }
+
+        snr = float(self.cfg["communication"]["access"]["user_target_psd_w_per_hz"]) * access_gain / float(
+            self.cfg["derived"]["noise_psd_eff_w_per_hz"])
+        eta_grid = np.log2(1.0 + snr)
+        eta_i = (np.sum(assigned * eta_grid, axis=1) * self.cell_area
+                 / np.maximum(demand_i, self.eps))
+        active = demand_i > self.eps
+        if np.any(active):
+            eta_active = eta_i[active]
+            weights = demand_i[active]
+            eta_mean = float(np.average(eta_active, weights=weights))
+            eta_p05 = _weighted_quantile(eta_active, weights, 0.05)
+            eta_p50 = _weighted_quantile(eta_active, weights, 0.50)
+            eta_p95 = _weighted_quantile(eta_active, weights, 0.95)
+        else:
+            eta_mean = eta_p05 = eta_p50 = eta_p95 = 0.0
+
+        eta_numer = float(np.sum(assigned * eta_grid) * self.cell_area)
+        assigned_total = float(np.sum(assigned) * self.cell_area)
+        eta_served_weighted = eta_numer / max(assigned_total, self.eps)
+        eta_all_workload_weighted = eta_numer / max(total_workload, self.eps)
+
+        uav_dist = np.linalg.norm(uav_xy - center[None, :], axis=1)
+        hub_to_hotspot = float(np.linalg.norm(hap_xy - center))
+        uav_to_hub = np.linalg.norm(uav_xy - hap_xy[None, :], axis=1)
+        return {
+            "total_workload_bits": total_workload,
+            "regions": regions,
+            "eta_mean": eta_mean,
+            "eta_p05": eta_p05,
+            "eta_p50": eta_p50,
+            "eta_p95": eta_p95,
+            "eta_served_workload_weighted": float(eta_served_weighted),
+            "eta_all_workload_weighted": float(eta_all_workload_weighted),
+            "hotspot_radius_m": float(1.5 * sigma),
+            "n_core_uav": int(np.sum(uav_dist <= sigma)),
+            "n_hotspot_uav": int(np.sum(uav_dist <= 1.5 * sigma)),
+            "n_background_uav": int(np.sum(uav_dist > 1.5 * sigma)),
+            "hub_to_hotspot_m": hub_to_hotspot,
+            "mean_uav_to_hub_m": float(np.mean(uav_to_hub)),
+            "max_uav_to_hub_m": float(np.max(uav_to_hub)),
+        }
+
+    def _hotspot_sigma_m(self) -> float:
+        field = self.cfg["demand"].get("workload_field")
+        if field is not None and "hotspot_sigma_m" in field:
+            return float(field["hotspot_sigma_m"])
+        return float(self.cfg["demand"]["activity_probability"]["hotspot_sigma_m"])
+
     # ---------------------------------------------- backhaul (v2: 60 GHz beam)
 
     def _backhaul_rate(self, hap_xy: np.ndarray, uav_xy: np.ndarray):
@@ -351,9 +475,13 @@ class FiniteKHAPUAVMECEnv:
         dz = float(self.cfg["env"]["hap"]["altitude_m"]) - float(self.cfg["env"]["uav"]["altitude_m"])
         horizontal = np.linalg.norm(uav_xy - hap_xy[None, :], axis=1)
         dist = np.sqrt(horizontal**2 + dz**2)
-        snr_db = (d["bh_link_budget_const_db"] - 20.0 * np.log10(np.maximum(dist, 1.0))
+        snr_db = (d["bh_link_budget_const_db"]
+                  - 10.0 * float(d.get("bh_pathloss_exponent", 2.0))
+                  * np.log10(np.maximum(dist, 1.0))
                   - d["bh_kappa_o2_db_per_km"] * dist / 1000.0)
         rate = d["bh_beam_bandwidth_hz"] * np.log2(1.0 + 10.0 ** (snr_db / 10.0))
+        if not d.get("bh_use_hard_cutoff", True):
+            return rate
         return np.where(snr_db >= d["bh_demod_snr_min_db"], rate, 0.0)
 
     # ----------------------------------------------------- energy (unchanged)
@@ -461,3 +589,15 @@ def _project_l2(vector: np.ndarray, radius: float):
     if norm <= radius or norm == 0.0:
         return vector.copy()
     return vector * (radius / norm)
+
+
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if values.size == 0 or float(np.sum(weights)) <= 0.0:
+        return 0.0
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cdf = np.cumsum(weights) / np.sum(weights)
+    return float(values[min(int(np.searchsorted(cdf, q, side="left")), values.size - 1)])
