@@ -32,6 +32,13 @@ from onpolicy.utils.run_config import (
 )
 
 
+def _hotspot_sigma_m(cfg):
+    field = cfg["demand"].get("workload_field")
+    if field is not None and "hotspot_sigma_m" in field:
+        return float(field["hotspot_sigma_m"])
+    return float(cfg["demand"]["activity_probability"]["hotspot_sigma_m"])
+
+
 def parse_args(args, parser):
     parser.add_argument("--mec_scenario", type=str, default="v2_iort_6km_mmwave")
     parser.add_argument("--mec_fleet_size", type=int, default=None)
@@ -45,7 +52,7 @@ def _heuristic_action(env, obs_dict):
     """Sunflower demand-matcher + centroid-tracking hub + queue-aware beta,
     expressed in the [-1,1]^3 action space MECEnv decodes."""
     k, R = env.k, float(env.cfg["env"]["region"]["lx_m"])
-    sigma = float(env.cfg["demand"]["activity_probability"]["hotspot_sigma_m"])
+    sigma = _hotspot_sigma_m(env.cfg)
     qmax = float(env.cfg["env"]["uav"]["queue_max_bits"])
     ux = np.asarray(obs_dict["uavs"]["xy_m"], float)
     q = np.asarray(obs_dict["uavs"]["queue_bits"], float)
@@ -71,6 +78,7 @@ def _episode(env, policy, mode, args, seed, freeze_hub=False):
     rnn = np.zeros((N, args.recurrent_N, args.hidden_size), np.float32)
     masks = np.ones((N, 1), np.float32)
     acc = dict(train=0.0, src=0.0, ovf=0.0, q=0.0, en=0.0, U=0.0, A=0.0, w1=0.0)
+    random_rng = np.random.default_rng(seed * 7 + 1)
     H = int(env.cfg["base"]["episode_horizon_slots"])
     for _ in range(H):
         ux = np.asarray(obs_dict["uavs"]["xy_m"], float)
@@ -84,7 +92,7 @@ def _episode(env, policy, mode, args, seed, freeze_hub=False):
         elif mode == "heuristic":
             act = _heuristic_action(env, obs_dict)
         elif mode == "random":
-            act = np.random.default_rng(seed * 7 + 1).uniform(-1, 1, (N, ACT_DIM))
+            act = random_rng.uniform(-1, 1, (N, ACT_DIM))
         else:  # hover: nobody moves; queue-aware beta
             act = np.zeros((N, ACT_DIM))
             act[1:, 2] = np.clip(np.asarray(obs_dict["uavs"]["queue_bits"], float)
@@ -161,7 +169,8 @@ def main(args):
               f"[>0 => learned hub trajectory load-bearing]")
 
     print("\n  W1 demand-matching (mass-weighted nearest-UAV distance, lower=better):")
-    base = {b: _avg(env, policy, b, all_args)["w1"] for b in ("hover", "random")}
+    base = {b: _avg(env, policy, b, all_args)["w1"]
+            for b in ("hover", "random") if b != ctrl}
     print(f"    {ctrl:<10}: {main_m['w1']:8.1f} m")
     for b, v in base.items():
         print(f"    {b:<10}: {v:8.1f} m")

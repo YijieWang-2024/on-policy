@@ -1,14 +1,14 @@
-# 诊断:UAV 空间分布对团队成本结构性不承重(2026-06-16)
+# ARCHIVE: v2/v3 中 UAV 空间分布不承重的诊断(2026-06-16)
 
-> ⚠️ **SUPERSEDED(2026-06-23)**:本文档的"结构性结论"是基于 **v2/v3 过覆盖/过载场景**
+> **ARCHIVED / SUPERSEDED(2026-06-24)**:本文档只保存 **v2/v3 过覆盖/过载场景**
 > 得出的,对这两个场景成立。但**该结论不是普遍的** ——
 > v4/v5 证明"静态 demand + 随机初始化"能让布局重新承重,但 v5 又暴露了全员挤热点。
-> 最新主线已转到 `v6_continuous_workload`:normalized continuous workload field、40MHz sub-6
-> 接入、28GHz continuous backhaul、500 cycles/bit 计算强度,并用真实信道积分 probe 验证
-> `n_hot=5-7` 是训练前候选最优区间。
+> `v6_continuous_workload` 的 3-seed 训练已经证明 UAV 轨迹可以稳定学习 demand matching；
+> 当前换机候选为 `v6_hap_loadbearing`，用于确认 HAP 轨迹和 beta 是否也能跨 seed 承重。
 > **根本原因:过覆盖(K=24,1.55×)+ 过载(offered/cap=2.4×)使接入/处理对布局不敏感。**
 > 消除这两个根因后 demand-matching 可以从成本最小化自然涌现。
-> 当前交接入口见 `HANDOFF.md`,v6 设计记录见 `docs/mec_env_port_spec.md` §12。
+> 本文不得用于当前参数决策。当前交接入口见 `../HANDOFF.md`，现行参数和结论见
+> `mec_env_port_spec.md` §13。
 
 > 一句话结论:**在本 MEC 模型的「最小化团队成本」目标下,UAV 群的空间分布
 > (均匀铺 vs 按 demand 密度正比)对成本几乎无差别(各种参数下成本差恒在 ±1~3%),

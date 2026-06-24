@@ -43,6 +43,13 @@ from onpolicy.utils.run_config import (                    # noqa: E402
 DT = 1.0
 
 
+def _hotspot_sigma_m(cfg):
+    field = cfg["demand"].get("workload_field")
+    if field is not None and "hotspot_sigma_m" in field:
+        return float(field["hotspot_sigma_m"])
+    return float(cfg["demand"]["activity_probability"]["hotspot_sigma_m"])
+
+
 # --------------------------------------------------------------------- policies
 def _heuristic_action(raw, ring, offset):
     st = raw.state
@@ -84,13 +91,14 @@ def _draw(raw, info, cov_r, svc_r, step, cum_cost):
     ax.set_xticks([]); ax.set_yticks([])
 
     cx, cy = info["demand_center_m"]
-    sigma = float(raw.cfg["demand"]["activity_probability"]["hotspot_sigma_m"])
+    sigma = _hotspot_sigma_m(raw.cfg)
     for r, alpha in ((2 * sigma, 0.06), (sigma, 0.10)):
         ax.add_patch(Circle((cx, cy), r, color="orange", alpha=alpha, lw=0))
     ax.plot(cx, cy, "*", color="darkorange", ms=14, label="demand hotspot")
 
     hx, hy = info["hap_xy_m"]
-    ax.add_patch(Circle((hx, hy), svc_r, fill=False, ls="--", ec="purple", lw=1.4, alpha=0.8))
+    if np.isfinite(svc_r):
+        ax.add_patch(Circle((hx, hy), svc_r, fill=False, ls="--", ec="purple", lw=1.4, alpha=0.8))
     in_range = np.asarray(info["backhaul_in_range"], dtype=bool)
     beta = info["projected_action"]["beta"]
 
@@ -194,7 +202,7 @@ def main(argv):
         print(f"policy source: {mode} (no trained model)")
 
     R = raw.lx
-    ring = min(float(cfg["demand"]["activity_probability"]["hotspot_sigma_m"]), 0.18 * R)
+    ring = min(_hotspot_sigma_m(cfg), 0.18 * R)
     ang = np.linspace(0, 2 * math.pi, mec.k, endpoint=False)
     offset = np.stack([ring * np.cos(ang), ring * np.sin(ang)], axis=1)
 

@@ -1,4 +1,10 @@
-# MEC 环境移植规范 v2 — 单一真源(2026-06-12 重构)
+# MEC 环境移植与实验设计规范（历史账本，更新至 2026-06-24）
+
+> **CURRENT STATUS(2026-06-24)**:本文前 12 节保留系统移植契约和 v2-v6 的历史演进，
+> 其中 60 GHz hard-cutoff、v2/v3 结论和旧 v6 链路预算不再代表当前训练参数。
+> 当前阶段已完成 `v6_continuous_workload` 的 1.5M-step、3-seed 评估；换机短程训练候选为
+> `v6_hap_loadbearing`。现行结论和参数以 §13、`../HANDOFF.md` 和
+> `mec_runbook.md` 为准。
 
 > 把论文 `finiteK_measure_valued_mdp_reformulation.tex` 的 finite-K 分层空中 MEC 环境移植进本
 > `on-policy` 库。本文是移植的**契约**:代码逐条对照实现并验收,任何偏离必须显式记录。
@@ -640,3 +646,114 @@ v6 可以进入下一轮训练,但训练后必须用诊断指标确认。验收�
 
 如果训练后仍然全员挤热点,优先审查 reward、探索、策略表达和动态训练轨迹,不要直接继续微调
 `A_tot` 或 `W_ac_total`。
+
+---
+
+## 13. 2026-06-24 三 seed 评估与 HAP 承重校准
+
+### 13.1 `v6_continuous_workload` 训练结论
+
+seed 1/2/3 均完成 1.5M environment steps，并在相同的 24 个 deterministic episodes 上评估：
+
+| controller | cost/slot | accept | W1 | queue share | HAP freeze |
+|---|---:|---:|---:|---:|---:|
+| MAPPO seed 1 | 2.4254 | 72.1% | 756.1 m | 13.1% | +24.0% |
+| MAPPO seed 2 | 2.3041 | 72.5% | 765.3 m | 9.9% | +0.5% |
+| MAPPO seed 3 | 2.5190 | 71.1% | 761.2 m | 13.1% | +0.2% |
+| heuristic | 2.1776 | 72.3% | 762.2 m | 3.6% | - |
+
+结论不是“只学习少部分动作”。原问题仍联合优化 UAV 轨迹、卸载比例和 HAP 轨迹。
+实验表明：
+
+- UAV 轨迹已跨 seed 稳定承重，demand matching 不是偶然现象；
+- beta 会影响系统，但 learned queue-aware control 仍弱于 heuristic；
+- HAP 只在 seed 1 明显承重，说明旧链路预算和当前策略表达都需要继续诊断；
+- 不应改成固定 heuristic beta 或只学习 beta residual，否则会改变论文的优化变量与问题定义。
+
+### 13.2 为什么不把 mmWave 总带宽降到 40-50 MHz
+
+FR2 系统常见的标准化信道带宽包括 50/100/200/400 MHz。对多 UAV 正交回传，
+`W_bh_total=400 MHz`、`K=16` 对应每架 25 MHz，是可解释的系统配置。为了人为制造
+HAP 承重而把总带宽压到 40-50 MHz，会使每架只剩约 2.5-3.1 MHz，反而削弱
+“mmWave 宽带回传”的工程合理性。
+
+因此扫描固定总带宽 400 MHz，改动净链路预算中同样真实且可说明的参数：
+
+- UAV 发射功率；
+- Tx/Rx 合并天线增益；
+- 噪声系数；
+- 显式 link margin；
+- 路径损耗指数。
+
+标准化带宽与功率等级依据可核查 3GPP TS 38.104 和 TS 38.101-2：
+
+- https://www.etsi.org/deliver/etsi_ts/138100_138199/138104/
+- https://www.etsi.org/deliver/etsi_ts/138100_138199/13810102/
+
+### 13.3 当前候选 `v6_hap_loadbearing`
+
+场景文件：
+
+```text
+onpolicy/envs/mec/scenarios/v6_hap_loadbearing.yaml
+```
+
+回传配置：
+
+```text
+carrier = 28 GHz
+W_bh_total = 400 MHz
+W_bh_i = 25 MHz, K=16
+P_tx = 23 dBm
+combined Tx/Rx antenna gain = 20 dB
+link margin = 7 dB
+noise figure = 8 dB
+path-loss exponent = 2.2
+hard cutoff = false
+```
+
+其中 `combined antenna gain` 是 Tx/Rx 两端合并后的有效主瓣增益，`link_margin_db`
+独立表示实现损耗、指向误差、遮挡余量等未显式建模因素，二者不得重复解释。
+
+该候选保持 `v6_continuous_workload` 的 workload、sub-6 接入、计算、队列、能耗和代价
+权重不变。这样 HAP 承重变化可归因于回传链路预算，而不是同时改动整个系统。
+
+### 13.4 机制验证
+
+10 个配对 heuristic episodes：
+
+| 消融/指标 | 结果 |
+|---|---:|
+| HAP freeze | cost +28.18% |
+| beta=0 | cost +213.30% |
+| UAV hover | cost +185.99% |
+| backhaul utilization | 44.08% |
+| HAP compute utilization | 75.16% |
+| accepted workload | 120.526 Mbit/slot |
+| offloaded workload | 68.011 Mbit/slot |
+| overflow | 0 |
+
+代表性回传速率：
+
+| horizontal distance | per-UAV rate |
+|---:|---:|
+| 0.5 km | 18.041 Mbit/s |
+| 1 km | 12.985 Mbit/s |
+| 2 km | 5.951 Mbit/s |
+| 3 km | 3.028 Mbit/s |
+
+该结果只证明物理机制中三类动作均有价值，不证明当前 MAPPO 已能同时学好它们。
+
+### 13.5 当前算法边界与下一步
+
+当前实现仍使用：
+
+- HAP actor 的 3 维 UAV 均值 descriptor；
+- 有序拼接的 centralized critic；
+- major/minor 共用训练批次，major 样本占比仅 `1/(K+1)`；
+- latest-only checkpoint。
+
+换机后先运行 `v6_hap_loadbearing` 的 300k-500k、seed 1/2/3 短程确认。只有当
+UAV demand matching、queue-aware beta 和 learned HAP freeze ablation 都跨 seed 稳定时，
+才进入 1.5M 或论文最终 5-seed 实验。若失败，应优先实现 SetRec population descriptor、
+置换不变 critic、role-wise loss/optimizer 和 step checkpoint，而不是删除任何优化变量。

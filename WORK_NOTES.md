@@ -1,5 +1,88 @@
 # Work Notes
 
+## 2026-06-24 - Three-seed evaluation and HAP load-bearing calibration
+
+### Summary
+
+Completed the first full training/evaluation stage for `v6_continuous_workload`.
+MAPPO seed 1/2/3 each reached 1.5M environment steps and were evaluated on the same
+24 deterministic episodes. UAV demand matching is reproducible, but beta/queue
+control remains weaker than the heuristic and HAP motion is not robustly learned.
+
+The next cross-machine stage therefore uses `v6_hap_loadbearing` for a 300k-500k
+step, 3-seed confirmation before any final long-run experiment.
+
+### Three-seed result
+
+| controller | cost/slot | accept | W1 | queue share | HAP freeze |
+|---|---:|---:|---:|---:|---:|
+| MAPPO seed 1 | 2.4254 | 72.1% | 756.1 m | 13.1% | +24.0% |
+| MAPPO seed 2 | 2.3041 | 72.5% | 765.3 m | 9.9% | +0.5% |
+| MAPPO seed 3 | 2.5190 | 71.1% | 761.2 m | 13.1% | +0.2% |
+| heuristic | 2.1776 | 72.3% | 762.2 m | 3.6% | - |
+
+Interpretation:
+
+- UAV trajectory learning is load-bearing and reproducible.
+- Offloading is active but queue-aware beta control is not yet consistently good.
+- The old backhaul budget leaves HAP motion nearly irrelevant in two of three seeds.
+- These are environment/algorithm diagnostics, not final paper results.
+
+### Engineering-constrained HAP scan
+
+Kept a realistic FR2 total bandwidth of 400 MHz and changed the net link budget
+instead of shrinking mmWave bandwidth to 40-50 MHz. The new candidate uses:
+
+```text
+carrier = 28 GHz
+W_bh_total = 400 MHz
+P_tx = 23 dBm
+combined Tx/Rx antenna gain = 20 dB
+link margin = 7 dB
+noise figure = 8 dB
+path-loss exponent = 2.2
+hard cutoff = false
+```
+
+Ten paired heuristic episodes gave:
+
+```text
+HAP freeze: +28.18% cost
+beta=0:     +213.30% cost
+UAV hover:  +185.99% cost
+backhaul utilization: 44.08%
+HAP compute utilization: 75.16%
+overflow: 0
+accepted: 120.526 Mbit/slot
+```
+
+This validates that all three action groups affect the mechanism. It does not prove
+that the current MAPPO architecture can learn all three simultaneously.
+
+### Code and documentation
+
+- Added `v6_hap_loadbearing.yaml` and `scan_v6_hap_loadbearing.py`.
+- Added explicit `link_margin_db` handling to the backhaul link budget.
+- Added access/backhaul/UAV-compute/HAP-compute utilization logging.
+- Made `design_v6_sanity.py` accept `--scenario`.
+- Fixed random evaluation so one RNG stream is retained for an entire episode.
+- Reorganized the Markdown documentation around `HANDOFF.md` and
+  `docs/mec_runbook.md`; historical diagnosis remains archived rather than deleted.
+
+### Verification
+
+```text
+MEC/config/policy tests: 18 passed, 1 skipped
+candidate config/env tests: 14 passed, 1 skipped
+```
+
+### Next step
+
+On the new machine, run tests, the candidate probe, a smoke test, then seed 1/2/3
+for 300k steps. Continue to 500k only while all seeds improve. Do not start the
+final 1.5M/5-seed/SetRec experiment until HAP freeze and beta diagnostics are
+stable across seeds.
+
 ## 2026-06-23 - v6 continuous workload scenario and training-preflight diagnostics
 
 ### Summary

@@ -1,4 +1,4 @@
-"""Design sanity checks for the v6 continuous-workload MEC scenario.
+"""Design sanity checks for a v6-family continuous-workload MEC scenario.
 
 This script is intentionally lightweight: it does not train a policy. It checks
 the scale calibration that matters before training:
@@ -10,11 +10,13 @@ the scale calibration that matters before training:
 
 Run from the repo root:
 
-    python -m onpolicy.scripts.analysis.design_v6_sanity
+    python -m onpolicy.scripts.analysis.design_v6_sanity \
+      --scenario v6_hap_loadbearing
 """
 
 from __future__ import annotations
 
+import argparse
 import math
 
 import numpy as np
@@ -176,7 +178,10 @@ def _rollout_probe(cfg: dict, n_hot: int, hub_offset_m: float = 0.0, horizon: in
 
 
 def main() -> None:
-    cfg = load_scenario("v6_continuous_workload")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scenario", default="v6_continuous_workload")
+    args = parser.parse_args()
+    cfg = load_scenario(args.scenario)
     k = int(cfg["env"]["fleet_size_k"])
     field = cfg["demand"]["workload_field"]
     a_tot = float(field["total_workload_bits_per_slot"])
@@ -184,7 +189,7 @@ def main() -> None:
         cfg["env"]["hap"]["cpu_frequency_hz"])
     offered_compute_ratio = float(cfg["compute"]["cycles_per_bit"]) * a_tot / f_total
 
-    print("=== v6 continuous-workload sanity ===")
+    print(f"=== MEC scenario sanity: {args.scenario} ===")
     print(f"K={k}  A_tot={a_tot / 1e6:.1f} Mbit/slot  zeta={field['hotspot_fraction']:.2f}")
     print(f"W_ac_i={cfg['communication']['access']['bandwidth_per_uav_hz'] / 1e6:.3f} MHz")
     print(f"W_bh_i={cfg['communication']['backhaul']['mmwave']['beam_bandwidth_hz'] / 1e6:.3f} MHz")

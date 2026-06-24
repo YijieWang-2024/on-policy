@@ -119,6 +119,17 @@ def test_v6_continuous_workload_scenario_sanity():
     assert 0.9 <= offered_compute_ratio <= 1.05
 
 
+def test_v6_hap_loadbearing_link_budget():
+    cfg = load_scenario("v6_hap_loadbearing")
+    mmw = cfg["communication"]["backhaul"]["mmwave"]
+    assert mmw["total_bandwidth_hz"] == 400e6
+    assert mmw["beam_bandwidth_hz"] == 25e6
+    assert mmw["tx_power_dbm"] == 23.0
+    assert mmw["antenna_gain_total_db"] == 20.0
+    assert mmw["link_margin_db"] == 7.0
+    assert cfg["derived"]["bh_link_margin_db"] == 7.0
+
+
 def test_validation_rejects_hardcoded_weights():
     cfg = load_scenario()
     cfg["cost"]["weights"]["omega_ovf_per_bit"] *= 1.5

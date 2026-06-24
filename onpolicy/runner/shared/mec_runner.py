@@ -25,6 +25,8 @@ class MECRunner(MPERunner):
         keys = (
             "training_cost", "src_cost", "ovf_cost", "queue_cost",
             "energy_cost", "accepted", "offloaded", "overflow", "U_src",
+            "access_utilization", "backhaul_utilization",
+            "uav_compute_utilization", "hub_compute_utilization",
             "source_outside", "source_capacity",
             "hotspot_offered", "hotspot_accepted", "hotspot_source",
             "background_offered", "background_accepted", "background_source",

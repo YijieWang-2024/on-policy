@@ -108,6 +108,14 @@ class MECEnv:
         regions = diag.get("regions", {})
         hot = regions.get("hotspot", {})
         bg = regions.get("background", {})
+        access_capacity = self.env.delta * float(np.sum(info.get("access_rate_bps", 0.0)))
+        backhaul_capacity = self.env.delta * float(np.sum(info.get("backhaul_rate_bps", 0.0)))
+        accepted = float(np.sum(info.get("A_i", 0.0)))
+        offloaded = float(np.sum(info.get("B_i", 0.0)))
+        local_processed = float(np.sum(info.get("S_i_U", 0.0)))
+        hub_processed = float(info.get("S_H", 0.0))
+        uav_compute_capacity = self.k * float(self.cfg["derived"]["uav_compute_capacity_bits"])
+        hub_compute_capacity = float(self.cfg["derived"]["hap_compute_capacity_bits"])
         cost = {
             "training_cost": info.get("training_cost"),
             "src_cost": info.get("src_cost_component"),
@@ -115,9 +123,13 @@ class MECEnv:
             "queue_cost": info.get("queue_cost_component"),
             "energy_cost": info.get("energy_cost_component"),
             "U_src": info.get("U_src"),
-            "accepted": float(np.sum(info.get("A_i", 0.0))),
-            "offloaded": float(np.sum(info.get("B_i", 0.0))),
+            "accepted": accepted,
+            "offloaded": offloaded,
             "overflow": float(np.sum(info.get("D_i_U", 0.0))) + float(info.get("D_H", 0.0)),
+            "access_utilization": accepted / max(access_capacity, 1e-12),
+            "backhaul_utilization": offloaded / max(backhaul_capacity, 1e-12),
+            "uav_compute_utilization": local_processed / max(uav_compute_capacity, 1e-12),
+            "hub_compute_utilization": hub_processed / max(hub_compute_capacity, 1e-12),
             "source_outside": float(info.get("source_loss_outside_bits", 0.0)),
             "source_capacity": float(info.get("source_loss_capacity_bits", 0.0)),
             "hotspot_offered": float(hot.get("offered_bits", 0.0)),

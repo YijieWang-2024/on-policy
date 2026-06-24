@@ -104,8 +104,17 @@ def derive_constants(cfg: dict[str, Any]) -> dict[str, float]:
     fspl_const_db = 20.0 * math.log10(float(mmw["carrier_frequency_hz"])) + 20.0 * math.log10(
         4.0 * math.pi / 2.99792458e8)
     noise_dbm = -174.0 + 10.0 * math.log10(w_beam) + float(mmw["noise_figure_db"])
-    bh_const_db = (float(mmw["tx_power_dbm"]) + float(mmw["antenna_gain_total_db"])
-                   - fspl_const_db - noise_dbm)
+    # Keep the implementation/pointing/fade margin explicit instead of hiding
+    # it inside the antenna gain. Existing scenarios omit it and retain their
+    # original link budget through the zero default.
+    link_margin_db = float(mmw.get("link_margin_db", 0.0))
+    bh_const_db = (
+        float(mmw["tx_power_dbm"])
+        + float(mmw["antenna_gain_total_db"])
+        - link_margin_db
+        - fspl_const_db
+        - noise_dbm
+    )
 
     return {
         "slot_length_s": delta,
@@ -119,6 +128,7 @@ def derive_constants(cfg: dict[str, Any]) -> dict[str, float]:
         "bh_link_budget_const_db": bh_const_db,
         "bh_pathloss_exponent": bh_alpha,
         "bh_kappa_o2_db_per_km": bh_kappa,
+        "bh_link_margin_db": link_margin_db,
         "bh_demod_snr_min_db": bh_demod,
         "bh_use_hard_cutoff": bh_cutoff,
         "bh_beam_bandwidth_hz": w_beam,
