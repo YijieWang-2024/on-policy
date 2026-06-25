@@ -1,9 +1,10 @@
-# MEC 换机器训练手册
+# MEC 训练与结构实验手册
 
-本手册用于在新机器上确认 `v6_hap_loadbearing` 参数。当前阶段只建议先跑
-300k-500k steps 的 3-seed 诊断，不直接启动论文最终实验。
+本手册用于 `v6_hap_loadbearing` 的结构实验。当前阶段不直接启动论文
+最终实验，先比较 mean、flat 和 set 三类输入架构。
 
-当前状态和实验依据见 [`../HANDOFF.md`](../HANDOFF.md)。
+当前状态见 [`../HANDOFF.md`](../HANDOFF.md)，网络与训练契约见
+[`setrec_architecture.md`](setrec_architecture.md)。
 
 ## 1. 环境安装
 
@@ -97,6 +98,7 @@ PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
   --env_name MEC --algorithm_name mappo \
   --experiment_name v6_hap_lb_smoke \
   --mec_scenario v6_hap_loadbearing \
+  --mec_policy_arch set \
   --seed 1 \
   --n_rollout_threads 2 --n_training_threads 2 \
   --episode_length 200 --num_env_steps 6400 \
@@ -108,28 +110,49 @@ PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
   --use_wandb
 ```
 
-## 5. 3-seed 短程训练
+架构开关：
 
-建议从 300k steps 开始。若三组仍在稳定改善，可延长至 500k。
+```text
+--mec_policy_arch legacy_mean  # 仅用于读取旧 14 维 mean checkpoints
+--mec_policy_arch mean         # 对齐基线：HAP p+mean，UAV s_i+p+mean，critic p+mean
+--mec_policy_arch flat         # 对齐基线：有序完整 UAV 集合，固定 K、标签敏感
+--mec_policy_arch set          # 对齐方法：公共不变 population encoder
+```
+
+新的 `mean/flat/set` 都使用完整 team group 和同一套 role-specific
+actor/team critic；只替换 population representation。环境局部观测为
+`[role, own(3), p(7)]`，runner 生成 centralized state
+`[p(7), s_1(3), ..., s_K(3)]`。旧模型若 config 中没有
+`mec_policy_arch`，加载脚本会自动选择 `legacy_mean`。
+
+## 5. 3-seed 结构对照训练
+
+旧 mean-descriptor MAPPO 已完成，但不属于严格对齐的表示消融。新的
+`mean/flat/set` 应使用相同预算、role-wise loss、step checkpoint 和固定验证集：
 
 ```bash
 SCENARIO=v6_hap_loadbearing
-STEPS=300000
+STEPS=512000
 SEED=1
-EXP=v6_hap_lb_probe_seed${SEED}
+ARCH=set
+EXP=v6_hap_lb_${ARCH}_seed${SEED}
 
 PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
   --env_name MEC --algorithm_name mappo \
   --experiment_name $EXP \
   --mec_scenario $SCENARIO \
+  --mec_policy_arch $ARCH \
   --seed $SEED \
-  --n_rollout_threads 16 --n_training_threads 6 \
+  --n_rollout_threads 16 --n_training_threads 2 \
+  --n_eval_rollout_threads 8 \
   --episode_length 200 --num_env_steps $STEPS \
   --ppo_epoch 5 --num_mini_batch 1 \
   --hidden_size 128 --layer_N 2 \
   --use_entropy_anneal --mec_logstd_init -1.9 --entropy_coef 0.003 \
   --lr 5e-4 --critic_lr 5e-4 --gamma 0.99 \
-  --log_interval 5 --save_interval 25 \
+  --mec_rolewise_loss \
+  --log_interval 5 --save_interval 20 --save_step_checkpoints \
+  --use_eval --eval_interval 20 --eval_episodes 24 --eval_seed 1000 \
   --use_wandb \
   2>&1 | tee ${EXP}.log
 ```
@@ -142,8 +165,13 @@ PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
 onpolicy/scripts/results/MEC/v6_hap_loadbearing/mappo/<experiment>/runN/
 ```
 
-注意：当前 `save_interval` 会更新 latest `actor.pt/critic.pt`，不会保留所有历史 step。
-短程参数确认可接受；正式长训练前应实现 step checkpoint 和 validation checkpoint selection。
+保存内容：
+
+```text
+models/actor.pt, critic.pt, trainer_state.pt        # latest
+models/checkpoints/step_<env_steps>/                # numbered
+models/best/                                        # fixed-validation best
+```
 
 ## 6. TensorBoard 与实时检查
 
@@ -217,11 +245,7 @@ policy 评估会同时输出冻结 HAP 消融。不要用单个 best episode 替
 - beta、UAV 轨迹和 HAP 轨迹不是只在单一 seed 承重。
 - 无持续 overflow。
 
-若 HAP 仍只在个别 seed 承重，不继续堆训练步数。下一步应转向：
-
-- major/minor 独立 encoder 或 optimizer；
-- SetRec population descriptor；
-- 置换不变 centralized critic；
-- role-wise PPO loss normalization。
-
-这些修改不改变论文的联合动作变量。
+若 Set-MAPPO 仍只在个别 seed 承重，不继续堆训练步数。先检查 permutation
+测试、descriptor 使用情况、critic 拟合和 role-wise KL，再决定是否进入
+reconstruction phase。decoder 与 auxiliary phase 的命令将在 phase 2
+实现后补充。

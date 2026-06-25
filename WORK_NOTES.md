@@ -1,5 +1,230 @@
 # Work Notes
 
+## 2026-06-26 - Phase archive: aligned MEC population policies
+
+### Archived scope
+
+This archive closes the engineering phase that began with HAP load-bearing
+calibration and ended with an information-matched Set-MAPPO phase-1 stack.
+
+Included work:
+
+- resumable latest/step/best checkpoints and saved run configuration;
+- role-balanced major/minor MAPPO optimization;
+- beta identifiability and stress-scenario diagnostics;
+- theory review against the implemented finite-K MEC dynamics;
+- canonical 11-D local observations and `7 + 3K` centralized state;
+- switchable `legacy_mean`, aligned `mean`, ordered `flat`, and invariant `set`;
+- shared set encoder ownership without duplicate actor/critic Adam states;
+- old 14-D actor/critic checkpoint compatibility;
+- training, evaluation, rendering, analysis, and experiment launch scripts;
+- structural, checkpoint, environment, and beta diagnostic tests.
+
+### Documentation review
+
+No Markdown file was removed because the current files have distinct roles:
+
+- `HANDOFF.md`: current state, evidence, and next action;
+- `WORK_NOTES.md`: chronological engineering record;
+- `docs/mec_runbook.md`: reproducible commands and experiment procedure;
+- `docs/mec_env_port_spec.md`: system contract and historical decisions;
+- `docs/setrec_architecture.md`: current algorithm and optimizer contract;
+- `docs/diagnosis_layout_not_loadbearing.md`: archived negative evidence.
+
+### Validation and next stage
+
+The focused suite passed with `51 passed, 1 skipped, 20 subtests passed`.
+Aligned mean, flat, and set each completed an end-to-end training smoke.
+New set checkpoints and historical legacy-mean checkpoints both reloaded; the
+historical checkpoint also restored optimizer/ValueNorm state and resumed
+training.
+
+The next stage is a fresh equal-budget, matched-seed `mean/flat/set`
+comparison. Reconstruction and the PPG-style auxiliary phase remain deferred
+until Set-MAPPO is stable across seeds.
+
+## 2026-06-25 - Information-matched mean/flat/set refactor
+
+### Decision
+
+The historical mean implementation was not a clean representation baseline:
+its actor used a shared 14-D role-conditioned trunk while its critic consumed
+the ordered flattened team rows. The aligned comparison now holds actor
+readouts, team critic, grouped PPO batching, and optimizer ownership fixed.
+
+### Implementation
+
+- Changed local MEC observations to `[role, own(3), p(7)]` (11 dimensions).
+- Added canonical centralized state `[p(7), s_1(3), ..., s_K(3)]`.
+- Aligned actor inputs:
+  - HAP: `p + representation`;
+  - UAV: `s_i + p + representation`.
+- Aligned critic input to `p + representation`.
+- Added aligned `mean`, ordered `flat`, and invariant `set` representations.
+- Renamed the old network semantics to `legacy_mean`.
+- Added adapters that reconstruct historical 14-D rows so old actor/critic
+  state dictionaries still load exactly.
+- Added automatic `legacy_mean` selection for model directories whose saved
+  config predates `mec_policy_arch`.
+
+### Experiment implication
+
+The old mean runs remain historical engineering references. A fair
+representation ablation requires fresh equal-budget `mean/flat/set` runs.
+
+### Verification
+
+- `51 passed, 1 skipped, 20 subtests passed`.
+- Mean, flat, and set each completed a one-update end-to-end training smoke.
+- A new set checkpoint reloaded and completed deterministic evaluation.
+- A historical 16-UAV checkpoint with no architecture metadata was inferred as
+  `legacy_mean`, evaluated, restored with optimizer/ValueNorm state, and trained
+  for one further update.
+
+## 2026-06-25 - SetRec theory review and architecture freeze
+
+### Summary
+
+Reviewed the proposed SetRec theory and algorithm against the actual
+`v6_hap_loadbearing` state, action, transition, queue, and cost implementation.
+
+Conclusions:
+
+- The finite-K environment is exchangeable under joint permutation of UAV states
+  and actions. The empirical-measure reformulation remains a sound method-level
+  starting point.
+- The current infinite-horizon Lipschitz theorem is conditional rather than a
+  verified property of v6. A normalized same-action perturbation probe observed a
+  one-step distance ratio up to about `4.93`, so the current natural metric does
+  not justify `gamma * L_F < 1`.
+- The public algorithm interface needs only one invariant UAV population
+  descriptor. Equivariant element tokens may exist inside the encoder but must
+  not bypass the descriptor into the actors.
+- The final phase-1 policy is `pi_H(a_H | p, xi)`,
+  `pi_U(a_i | s_i, p, xi)`, with one team value `V(p, xi)`.
+- Reconstruction will be added only after Set-MAPPO is stable, using a decoder
+  that reads only `xi`, debiased Sinkhorn divergence, and a PPG-style auxiliary
+  phase with policy-KL protection.
+
+### Baseline contract
+
+Four architecture switches are retained:
+
+- `legacy_mean`: historical mean-descriptor MAPPO, checkpoint compatibility.
+- `mean`: aligned low-capacity mean descriptor baseline.
+- `flat`: information-complete ordered concatenation baseline. It is fixed-K and
+  label-sensitive, and is not described as decentralized-execution MAPPO.
+- `set`: the proposed public invariant population encoder.
+
+The detailed contract is now isolated in `docs/setrec_architecture.md`.
+
+### Immediate implementation order
+
+1. Add `legacy_mean/mean/flat/set` architecture selection.
+2. Preserve complete team groups in PPO minibatches.
+3. Implement the public Set Transformer encoder, role-specific actor readouts,
+   and one invariant team critic.
+4. Add permutation, ratio, shape, and gradient-ownership tests.
+5. Run smoke tests before adding the reconstruction decoder.
+
+### Phase-1 implementation result
+
+Implemented:
+
+- `--mec_policy_arch legacy_mean|mean|flat|set`;
+- ordered full-state FlatConcat actors/critic;
+- one public Set Transformer population encoder shared by HAP/UAV actors and
+  consumed with stop-gradient by one team critic;
+- common role-specific fusion MLPs for aligned mean/flat/set readouts;
+- grouped PPO minibatches that preserve complete `(time, environment, team)` rows;
+- critic-value recomputation after an encoder-changing actor update;
+- checkpoint-compatible actor/critic ownership.
+
+The environment physics was not changed. Local rows are now canonical 11-D
+physical observations, and the runner builds the canonical team state. A
+compatibility adapter reconstructs the historical 14-D rows only inside
+`legacy_mean`.
+
+### Verification
+
+```text
+New and existing MEC policy tests: passed
+Full focused repository suite: 51 passed, 1 skipped, 20 subtests passed
+Mean training smoke: passed
+Set training smoke: passed
+Flat training smoke: passed
+Set checkpoint restore smoke: passed
+Set policy evaluation from saved config/checkpoint: passed
+```
+
+The full-suite first attempt reported two setup errors caused by denied access to
+the default Windows pytest temp directory; both tests passed when rerun with a
+writable `--basetemp`. No code failure remained.
+
+### Next step
+
+Run fresh equal-budget `mean/flat/set` seed 1/2/3 experiments. Keep existing
+role-wise mean results as historical references only. Do not add the decoder
+until Set-MAPPO is stable.
+
+## 2026-06-24 - Role-wise MAPPO and resumable checkpoint validation
+
+### Summary
+
+Implemented the first two algorithm-engineering steps after the
+`v6_hap_loadbearing` diagnosis:
+
+- resumable latest/step checkpoints plus fixed-seed best-checkpoint selection;
+- equal-role MEC advantage, PPO surrogate, and entropy normalization.
+
+Then repeated the 512k-step seed 1/2/3 experiment with the same environment and
+training budget.
+
+### Checkpoint changes
+
+- Retain `models/checkpoints/step_<env_steps>/`.
+- Save actor, critic, optimizer state, ValueNorm state, step count, and config.
+- Evaluate on fixed `eval_seed=1000` episodes and retain `models/best/`.
+- Verified restoring training from a numbered checkpoint.
+
+All three role-wise runs selected the final 512k checkpoint. Therefore checkpoint
+selection did not change the chosen model in this experiment, but it now prevents
+future structural experiments from silently depending on a degraded latest model.
+
+### Role-wise result
+
+| setting | seed | cost/slot | accepted Mbit/slot | W1 | HAP freeze |
+|---|---:|---:|---:|---:|---:|
+| original | 1 | 2.8311 | 96.0 | 836.1 m | +4.7% |
+| original | 2 | 2.4619 | 102.9 | 782.8 m | +11.2% |
+| original | 3 | 2.3951 | 104.6 | 774.5 m | +4.6% |
+| role-wise | 1 | 2.5011 | 102.5 | 802.0 m | +7.4% |
+| role-wise | 2 | 2.3863 | 104.5 | 761.9 m | +10.4% |
+| role-wise | 3 | 2.5010 | 102.4 | 797.7 m | +11.2% |
+
+Interpretation:
+
+- Mean cost improved by 3.9% when comparing the mean costs directly
+  (2.5627 -> 2.4628).
+- HAP freeze improved from +6.8% to +9.7% on average. Major learning is
+  materially better, but seed 1 still misses the +10% criterion.
+- UAV motion remains strongly load-bearing.
+- Per-UAV beta remains ineffective: replacing each step's beta vector by its
+  fleet mean changes cost by about -1.0%, +0.03%, and +0.30%.
+
+The next step is therefore SetRec population encoding plus a permutation-invariant
+critic, while retaining role-wise training and the new checkpoint protocol.
+
+### Verification
+
+```text
+Focused tests: 8 passed
+Full suite: 34 passed, 1 skipped, 20 subtests passed
+Checkpoint restore smoke: passed
+Role-wise 512k training: 3/3 completed without stderr
+Matched-seed 24-episode diagnostics: 3/3 completed
+```
+
 ## 2026-06-24 - Three-seed evaluation and HAP load-bearing calibration
 
 ### Summary

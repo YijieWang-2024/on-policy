@@ -19,6 +19,12 @@ import torch
 from onpolicy.config import get_config
 from onpolicy.envs.env_wrappers import DummyVecEnv, SubprocVecEnv
 from onpolicy.envs.mec.MEC_env import MECEnv
+from onpolicy.utils.run_config import (
+    apply_legacy_mec_arch_default,
+    apply_saved_args,
+    explicit_option_names,
+    load_model_config,
+)
 
 
 def _make_env_fns(all_args, base_seed):
@@ -64,7 +70,21 @@ def _probe_num_agents(all_args):
 
 def main(args):
     parser = get_config()
+    explicit_names = explicit_option_names(args)
     all_args = parse_args(args, parser)
+    saved_args = load_model_config(all_args.model_dir)
+    if saved_args:
+        apply_saved_args(
+            all_args,
+            saved_args,
+            explicit_names,
+            skip={"model_dir", "experiment_name"},
+        )
+        print(f"loaded run config from {all_args.model_dir}")
+    if apply_legacy_mec_arch_default(
+        all_args, saved_args, explicit_names
+    ):
+        print("checkpoint predates architecture metadata; using legacy_mean")
 
     if all_args.algorithm_name == "rmappo":
         all_args.use_recurrent_policy = True

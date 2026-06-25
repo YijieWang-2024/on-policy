@@ -16,5 +16,6 @@ wandb
 .vscode
 api
 logs
+training_logs/
 .nfs*
 *.so

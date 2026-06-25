@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import numpy as np
 
+from onpolicy.envs.mec.observation import repeat_team_state
 from onpolicy.runner.shared.mpe_runner import MPERunner
 
 
 class MECRunner(MPERunner):
+    def _share_obs(self, obs):
+        if not self.use_centralized_V:
+            return obs
+        return repeat_team_state(obs)
+
     def _actions_to_env(self, actions, envs):
         action_space = envs.action_space[0]
         if action_space.__class__.__name__ == "Box":

@@ -1,10 +1,11 @@
-# MEC 环境移植与实验设计规范（历史账本，更新至 2026-06-24）
+# MEC 环境移植与实验设计规范（历史账本，更新至 2026-06-26）
 
-> **CURRENT STATUS(2026-06-24)**:本文前 12 节保留系统移植契约和 v2-v6 的历史演进，
+> **CURRENT STATUS(2026-06-26)**:本文前 12 节保留系统移植契约和 v2-v6 的历史演进，
 > 其中 60 GHz hard-cutoff、v2/v3 结论和旧 v6 链路预算不再代表当前训练参数。
 > 当前阶段已完成 `v6_continuous_workload` 的 1.5M-step、3-seed 评估；换机短程训练候选为
 > `v6_hap_loadbearing`。现行结论和参数以 §13、`../HANDOFF.md` 和
-> `mec_runbook.md` 为准。
+> `mec_runbook.md` 为准。当前 SetRec 网络、输入和优化器契约已移至
+> `setrec_architecture.md`；本文不再作为现行算法结构的唯一依据。
 
 > 把论文 `finiteK_measure_valued_mdp_reformulation.tex` 的 finite-K 分层空中 MEC 环境移植进本
 > `on-policy` 库。本文是移植的**契约**:代码逐条对照实现并验收,任何偏离必须显式记录。
@@ -757,3 +758,62 @@ hard cutoff = false
 UAV demand matching、queue-aware beta 和 learned HAP freeze ablation 都跨 seed 稳定时，
 才进入 1.5M 或论文最终 5-seed 实验。若失败，应优先实现 SetRec population descriptor、
 置换不变 critic、role-wise loss/optimizer 和 step checkpoint，而不是删除任何优化变量。
+
+### 13.6 Role-wise MAPPO 与 checkpoint 对照（2026-06-24）
+
+已实现：
+
+- latest + numbered step checkpoint；
+- actor/critic、optimizer、ValueNorm、step 和 config 的完整保存/恢复；
+- 固定 `eval_seed=1000`、24 episodes 的 best checkpoint selection；
+- major/minor 分角色 advantage normalization；
+- major/minor PPO surrogate 与 entropy 等权合并。
+
+在 `v6_hap_loadbearing` 上以相同 512k steps、seed 1/2/3 重训：
+
+| setting | mean cost | mean accepted | mean W1 | mean HAP freeze |
+|---|---:|---:|---:|---:|
+| original MAPPO | 2.5627 | 101.2 Mbit/slot | 797.8 m | +6.8% |
+| role-wise MAPPO | 2.4628 | 103.2 Mbit/slot | 787.2 m | +9.7% |
+
+role-wise 使 seed 2/3 的 HAP freeze 达到 +10.4%/+11.2%，seed 1 从 +4.7%
+提高到 +7.4%。说明 major credit dilution 确实是问题之一，但不是唯一问题。
+
+beta 仍未学到有效的逐 UAV queue-aware control：将每步 beta 向量替换为其
+fleet mean，三个 seed 的 cost 变化分别为 -1.0%、+0.03%、+0.30%。因此下一步仍是
+SetRec population descriptor、置换不变 critic，以及面向 beta 的 credit diagnostics；
+不能直接进入最终长训练。
+
+### 13.7 Set-MAPPO phase-1 实现（2026-06-25）
+
+当前代码保留四种显式结构：
+
+- `legacy_mean`：历史 14 维 actor 与 ordered-flat critic，仅用于旧 checkpoint；
+- `mean`：对齐的 3 维均值 descriptor 基线；
+- `flat`：HAP actor 输入 `p+s_{1:K}`，UAV actor 输入
+  `s_i+p+s_{1:K}`，critic 输入 `p+s_{1:K}`；
+- `set`：一个公共不变 population encoder 生成 `xi`，HAP/UAV actor 和
+  单一 team critic 使用与 mean/flat 相同的 role-specific fusion 读取 `xi`。
+
+Set encoder 内部可以产生等变 element tokens，但它们不作为额外接口交给
+actor。critic 使用同一个 encoder 的当前 descriptor，value gradient 在 descriptor
+处停止；encoder 只由 PPO policy optimizer 更新。Mean/Flat/Set PPO minibatch 保留完整
+team group，不再把 agent row 独立打散。
+
+已通过 descriptor/HAP/value 的置换不变、UAV action 等变、PPO ratio、梯度归属、
+grouped batch、训练 smoke、checkpoint restore 和 policy eval。下一步是相同预算的
+`mean/flat/set` 三 seed 结构对照。decoder 和 Sinkhorn auxiliary phase 尚未实现。
+
+### 13.8 Population representation 对齐重构（2026-06-25）
+
+为避免把 actor/critic 结构差异误解释为 descriptor 效果，当前环境和算法接口调整为：
+
+- local observation：`[role, own(3), p(7)]`；
+- centralized state：`[p(7), s_1(3), ..., s_K(3)]`；
+- aligned mean：HAP `p+mean`，UAV `s_i+p+mean`，critic `p+mean`；
+- flat/set 使用完全相同的 role-specific fusion、action heads、team critic 和
+  grouped PPO，仅分别把 representation 换成 ordered concat 或 invariant `xi`。
+
+旧 14 维 mean actor 与 ordered-flat critic 作为 `legacy_mean` 保留，只承担历史
+checkpoint 兼容和旧结果复现。它不再被视为严格的 representation ablation。
+因此正式结构对照必须重新训练同预算 `mean/flat/set`，不能直接沿用旧 mean 数值。

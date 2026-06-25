@@ -26,6 +26,7 @@ from onpolicy.config import get_config
 from onpolicy.envs.mec.MEC_env import MECEnv, ACT_DIM
 from onpolicy.envs.mec.metrics import demand_matching_w1
 from onpolicy.utils.run_config import (
+    apply_legacy_mec_arch_default,
     apply_saved_args,
     explicit_option_names,
     load_model_config,
@@ -132,6 +133,10 @@ def main(args):
             skip={"model_dir", "mec_eval_controller", "mec_eval_episodes"},
         )
         print(f"loaded run config from {all_args.model_dir}")
+    if apply_legacy_mec_arch_default(
+        all_args, saved_args, explicit_names
+    ):
+        print("checkpoint predates architecture metadata; using legacy_mean")
     all_args.use_recurrent_policy = all_args.algorithm_name == "rmappo"
     all_args.use_naive_recurrent_policy = False
     torch.manual_seed(all_args.seed); np.random.seed(all_args.seed)

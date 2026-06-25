@@ -17,7 +17,8 @@ sys.path.insert(0, "F:/置换不变性/YijieWang-2024-on-policy")
 from onpolicy.config import get_config
 from onpolicy.envs.mec.MEC_env import MECEnv, ACT_DIM
 from onpolicy.envs.mec.metrics import demand_matching_w1
-from onpolicy.utils.run_config import apply_saved_args, load_model_config
+from onpolicy.utils.run_config import (
+    apply_legacy_mec_arch_default, apply_saved_args, load_model_config)
 from onpolicy.algorithms.mec.mec_policy import MECPolicy
 
 BASE = "F:/置换不变性/YijieWang-2024-on-policy/onpolicy/scripts/results/MEC/v3_iort_learnable/mappo/v3_logpfix_ent003"
@@ -32,6 +33,7 @@ def load_policy(model_dir):
     saved = load_model_config(model_dir)
     if saved:
         apply_saved_args(a, saved, set(), skip={"model_dir"})
+    apply_legacy_mec_arch_default(a, saved, set(), model_dir=model_dir)
     a.use_recurrent_policy = False; a.use_naive_recurrent_policy = False
     dev = torch.device("cpu")
     env = MECEnv(a)

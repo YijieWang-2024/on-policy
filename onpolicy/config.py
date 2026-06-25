@@ -246,8 +246,57 @@ def get_config():
                         help="floor for the annealed entropy coefficient (default: 0.0)")
     parser.add_argument("--mec_logstd_init", type=float, default=-1.9,
                         help="initial log-std of the MEC actor's Gaussian velocity heads (sigma=exp); -1.9 => sigma~0.15 to avoid max-speed careening")
+    parser.add_argument(
+        "--mec_policy_arch",
+        type=str,
+        default="mean",
+        choices=["legacy_mean", "mean", "flat", "set"],
+        help=(
+            "MEC population representation: aligned mean, ordered flat, "
+            "invariant set, or legacy_mean for historical checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_dim",
+        type=int,
+        default=64,
+        help="token/latent width of the MEC population encoder",
+    )
+    parser.add_argument(
+        "--mec_set_heads",
+        type=int,
+        default=4,
+        help="attention heads in the MEC population encoder/readouts",
+    )
+    parser.add_argument(
+        "--mec_set_num_seeds",
+        type=int,
+        default=4,
+        help="number of invariant population latent slots",
+    )
+    parser.add_argument(
+        "--mec_set_element_blocks",
+        type=int,
+        default=2,
+        help="self-attention blocks before population pooling",
+    )
+    parser.add_argument(
+        "--mec_set_latent_blocks",
+        type=int,
+        default=1,
+        help="self-attention blocks among pooled population slots",
+    )
     parser.add_argument("--target_kl", type=float, default=None,
                         help="optional approximate-KL threshold for early stopping PPO epochs")
+    parser.add_argument(
+        "--mec_rolewise_loss",
+        action="store_true",
+        default=False,
+        help=(
+            "for MEC, normalize advantages separately by role and combine "
+            "major/minor PPO policy and entropy losses with equal weight"
+        ),
+    )
     parser.add_argument("--value_loss_coef", type=float,
                         default=1, help='value loss coefficient (default: 0.5)')
     parser.add_argument("--use_max_grad_norm",
@@ -272,6 +321,12 @@ def get_config():
                         default=False, help='use a linear schedule on the learning rate')
     # save parameters
     parser.add_argument("--save_interval", type=int, default=1, help="time duration between contiunous twice models saving.")
+    parser.add_argument(
+        "--save_step_checkpoints",
+        action="store_true",
+        default=False,
+        help="also retain numbered step checkpoints instead of latest-only models",
+    )
 
     # log parameters
     parser.add_argument("--log_interval", type=int, default=5, help="time duration between contiunous twice log printing.")
@@ -280,6 +335,12 @@ def get_config():
     parser.add_argument("--use_eval", action='store_true', default=False, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
     parser.add_argument("--eval_interval", type=int, default=25, help="time duration between contiunous twice evaluation progress.")
     parser.add_argument("--eval_episodes", type=int, default=32, help="number of episodes of a single evaluation.")
+    parser.add_argument(
+        "--eval_seed",
+        type=int,
+        default=1000,
+        help="fixed base seed for deterministic validation and best-checkpoint selection",
+    )
 
     # render parameters
     parser.add_argument("--save_gifs", action='store_true', default=False, help="by default, do not save render video. If set, save video.")

@@ -1,15 +1,8 @@
-"""Multi-agent adapter: wrap FiniteKHAPUAVMECEnv into the on-policy list interface.
+"""Multi-agent adapter for the finite-K HAP/UAV MEC environment.
 
-Homogeneous N = K+1 agent layout for the as-built D1a-folded design (spec
-section 8.2): agent 0 = major/hub, agents 1..K = minor UAVs. All agents share one
-14-d observation layout and one 3-d Box action; a role flag distinguishes major
-from minor. The major uses action dims [0,1] as v^H and ignores dim 2; each minor
-uses [0,1] as v_i and dim 2 as beta in [0,1]. The actual role routing (separate
-major head + shared minor head) lives in MECActor (algorithms/mec/mec_policy.py);
-the buffer stays homogeneous so this runs on the stock shared runner with only a
-Box passthrough (D4, see mec_runner). The single-head D1b variant (padding + role
-one-hot) was rejected; the later upgrade is the Set Transformer population
-descriptor (spec section 8.1).
+Agent 0 is the HAP and agents 1..K are homogeneous UAVs. Local observations
+contain only role, own state, and public HAP/demand state. Population
+representations are constructed by the policy, not baked into the environment.
 """
 
 from __future__ import annotations
@@ -26,8 +19,9 @@ except Exception:  # pragma: no cover
 from onpolicy.envs.mec.config_loader import load_scenario
 from onpolicy.envs.mec.finite_k_env import FiniteKHAPUAVMECEnv
 from onpolicy.envs.mec.metrics import demand_matching_w1
+from onpolicy.envs.mec.observation import AGENT_OBS_DIM, team_state_dim
 
-OBS_DIM = 14  # role(1) + own(3) + hub(3) + demand(4) + descriptor(3)
+OBS_DIM = AGENT_OBS_DIM  # role(1) + own(3) + public HAP/demand state(7)
 ACT_DIM = 3   # [vx, vy, beta_raw]; major ignores beta_raw
 
 
@@ -46,7 +40,12 @@ class MECEnv:
         self.v_u_max = float(self.cfg["env"]["uav"]["velocity_max_mps"])
 
         obs_box = spaces.Box(-np.inf, np.inf, (OBS_DIM,), dtype=np.float32)
-        share_box = spaces.Box(-np.inf, np.inf, (OBS_DIM * self.num_agents,), dtype=np.float32)
+        share_box = spaces.Box(
+            -np.inf,
+            np.inf,
+            (team_state_dim(self.num_agents),),
+            dtype=np.float32,
+        )
         act_box = spaces.Box(-1.0, 1.0, (ACT_DIM,), dtype=np.float32)
         self.observation_space = [obs_box for _ in range(self.num_agents)]
         self.share_observation_space = [share_box for _ in range(self.num_agents)]
@@ -86,14 +85,12 @@ class MECEnv:
         uav = obs["normalized"]["uavs"]           # (K, 3): [xy(2), q(1)]
         hub_pub = hub[:3]                         # hub xy + queue
         demand = hub[3:7]                         # demand center + velocity
-        descriptor = uav.mean(axis=0)             # mean UAV [xy(2), q(1)]
-
         rows = np.zeros((self.num_agents, OBS_DIM), dtype=np.float32)
         # agent 0 = major: own block = hub state
-        rows[0] = np.concatenate([[1.0], hub_pub, hub_pub, demand, descriptor])
+        rows[0] = np.concatenate([[1.0], hub_pub, hub_pub, demand])
         # agents 1..K = minors: own block = own UAV state
         for i in range(self.k):
-            rows[i + 1] = np.concatenate([[0.0], uav[i], hub_pub, demand, descriptor])
+            rows[i + 1] = np.concatenate([[0.0], uav[i], hub_pub, demand])
         return rows
 
     def _agent_infos(self, info: dict[str, Any], reward: float) -> list[dict]:

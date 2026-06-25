@@ -78,3 +78,26 @@ def apply_saved_args(args: Namespace, saved_args: dict[str, Any],
     for key, value in saved_args.items():
         if key not in explicit_names and key not in skip:
             setattr(args, key, value)
+
+
+def apply_legacy_mec_arch_default(
+    args: Namespace,
+    saved_args: dict[str, Any],
+    explicit_names: set[str],
+    model_dir: str | Path | None = None,
+) -> bool:
+    """Select the historical MEC network for checkpoints predating arch metadata.
+
+    New runs default to the information-matched ``mean`` baseline. A model
+    directory whose saved config has no ``mec_policy_arch`` necessarily
+    predates that change and must use ``legacy_mean`` unless the caller
+    explicitly overrides it.
+    """
+    if (
+        (model_dir or getattr(args, "model_dir", None))
+        and "mec_policy_arch" not in explicit_names
+        and "mec_policy_arch" not in saved_args
+    ):
+        args.mec_policy_arch = "legacy_mean"
+        return True
+    return False

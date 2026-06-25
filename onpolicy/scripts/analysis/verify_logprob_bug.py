@@ -9,6 +9,7 @@ import torch
 sys.path.insert(0, "F:/置换不变性/YijieWang-2024-on-policy")
 RUN = "F:/置换不变性/YijieWang-2024-on-policy/onpolicy/scripts/results/MEC/v3_iort_learnable/mappo/v3_explorefix_k12/run1"
 args = SimpleNamespace(**json.load(open(RUN + "/models/config.json"))["all_args"])
+args.mec_policy_arch = getattr(args, "mec_policy_arch", "legacy_mean")
 
 try:
     from gym import spaces
