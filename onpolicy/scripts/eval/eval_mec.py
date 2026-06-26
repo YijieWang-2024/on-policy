@@ -17,7 +17,9 @@ Examples
 """
 
 import math
+import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -43,9 +45,27 @@ def _hotspot_sigma_m(cfg):
 def parse_args(args, parser):
     parser.add_argument("--mec_scenario", type=str, default="v2_iort_6km_mmwave")
     parser.add_argument("--mec_fleet_size", type=int, default=None)
+    parser.add_argument(
+        "--mec_episode_horizon",
+        type=int,
+        default=None,
+        help="override the MEC scenario horizon for standalone evaluation",
+    )
     parser.add_argument("--mec_eval_controller", type=str, default="heuristic",
                         choices=["heuristic", "hover", "random", "policy"])
-    parser.add_argument("--mec_eval_episodes", type=int, default=10)
+    parser.add_argument("--mec_eval_episodes", type=int, default=None)
+    parser.add_argument("--mec_eval_seed", type=int, default=None)
+    parser.add_argument("--mec_eval_seed_stride", type=int, default=None)
+    parser.add_argument("--mec_eval_output", type=str, default=None)
+    parser.add_argument(
+        "--mec_eval_skip_baselines",
+        action="store_true",
+        default=False,
+        help=(
+            "skip hover/random baselines when they are evaluated once "
+            "separately for a shared test split"
+        ),
+    )
     return parser.parse_known_args(args)[0]
 
 
@@ -115,8 +135,17 @@ def _episode(env, policy, mode, args, seed, freeze_hub=False):
 
 
 def _avg(env, policy, mode, args, **kw):
-    runs = [_episode(env, policy, mode, args, seed=args.seed + 13 * i, **kw)
-            for i in range(args.mec_eval_episodes)]
+    runs = [
+        _episode(
+            env,
+            policy,
+            mode,
+            args,
+            seed=args.mec_eval_seed + args.mec_eval_seed_stride * i,
+            **kw,
+        )
+        for i in range(args.mec_eval_episodes)
+    ]
     return {k: float(np.mean([r[k] for r in runs])) for k in runs[0]}
 
 
@@ -130,7 +159,15 @@ def main(args):
             all_args,
             saved_args,
             explicit_names,
-            skip={"model_dir", "mec_eval_controller", "mec_eval_episodes"},
+            skip={
+                "model_dir",
+                "mec_eval_controller",
+                "mec_eval_episodes",
+                "mec_eval_seed",
+                "mec_eval_seed_stride",
+                "mec_eval_output",
+                "mec_eval_skip_baselines",
+            },
         )
         print(f"loaded run config from {all_args.model_dir}")
     if apply_legacy_mec_arch_default(
@@ -139,6 +176,12 @@ def main(args):
         print("checkpoint predates architecture metadata; using legacy_mean")
     all_args.use_recurrent_policy = all_args.algorithm_name == "rmappo"
     all_args.use_naive_recurrent_policy = False
+    if all_args.mec_eval_episodes is None:
+        all_args.mec_eval_episodes = int(all_args.test_episodes)
+    if all_args.mec_eval_seed is None:
+        all_args.mec_eval_seed = int(all_args.test_seed)
+    if all_args.mec_eval_seed_stride is None:
+        all_args.mec_eval_seed_stride = int(all_args.test_seed_stride)
     torch.manual_seed(all_args.seed); np.random.seed(all_args.seed)
     device = torch.device("cpu")
 
@@ -168,20 +211,49 @@ def main(args):
     print(f"  share energy         : {main_m['en'] / t * 100:5.1f}%")
     print(f"  mean team cost / slot: {t / H:.4f}")
 
+    fix = None
     if ctrl == "policy":
         fix = _avg(env, policy, "policy", all_args, freeze_hub=True)
         print(f"  hub ablation (freeze@centre): {(fix['train'] / t - 1) * 100:+5.1f}%  "
               f"[>0 => learned hub trajectory load-bearing]")
 
     print("\n  W1 demand-matching (mass-weighted nearest-UAV distance, lower=better):")
-    base = {b: _avg(env, policy, b, all_args)["w1"]
-            for b in ("hover", "random") if b != ctrl}
+    base = (
+        {}
+        if all_args.mec_eval_skip_baselines
+        else {
+            b: _avg(env, policy, b, all_args)["w1"]
+            for b in ("hover", "random")
+            if b != ctrl
+        }
+    )
     print(f"    {ctrl:<10}: {main_m['w1']:8.1f} m")
     for b, v in base.items():
         print(f"    {b:<10}: {v:8.1f} m")
-    best = min(base.values())
-    print(f"  -> demand-matching: {(1 - main_m['w1'] / max(best, 1e-9)) * 100:+.0f}% vs best baseline "
-          f"({'GOAL MET' if main_m['w1'] < 0.9 * best else 'not clearly better'})")
+    if base:
+        best = min(base.values())
+        print(f"  -> demand-matching: {(1 - main_m['w1'] / max(best, 1e-9)) * 100:+.0f}% vs best baseline "
+              f"({'GOAL MET' if main_m['w1'] < 0.9 * best else 'not clearly better'})")
+
+    if all_args.mec_eval_output:
+        payload = {
+            "split": "held_out_test",
+            "controller": ctrl,
+            "scenario": all_args.mec_scenario,
+            "fleet_size_k": env.k,
+            "episode_horizon": H,
+            "episodes": all_args.mec_eval_episodes,
+            "base_seed": all_args.mec_eval_seed,
+            "seed_stride": all_args.mec_eval_seed_stride,
+            "metrics": main_m,
+            "freeze_hap_metrics": fix,
+            "baseline_w1": base,
+        }
+        output = Path(all_args.mec_eval_output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.write("\n")
 
 
 if __name__ == "__main__":

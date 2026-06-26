@@ -33,12 +33,15 @@ def load_scenario(name_or_path: str | Path = DEFAULT_SCENARIO,
     """
     raw = _read_yaml(_resolve(name_or_path))
     cfg = unwrap_values(raw)
+    reference_fleet_size = int(cfg["env"]["fleet_size_k"])
     if fleet_size_k is not None:
         cfg["env"]["fleet_size_k"] = int(fleet_size_k)
     _apply_bandwidth_derivation(cfg)
     _generate_uav_deployment(cfg)
     _broadcast_initial_queues(cfg)
-    cfg["normalization"] = _derive_normalization(cfg)
+    cfg["normalization"] = _derive_normalization(
+        cfg, fleet_size_reference=reference_fleet_size
+    )
     cfg["cost"]["weights"] = derive_cost_weights(cfg)
     cfg["derived"] = derive_constants(cfg)
     validate_scenario(cfg)
@@ -292,12 +295,17 @@ def _apply_bandwidth_derivation(cfg: dict[str, Any]) -> None:
         mmw["bandwidth_allocation"] = "fixed_total"
 
 
-def _derive_normalization(cfg: dict[str, Any]) -> dict[str, Any]:
+def _derive_normalization(
+    cfg: dict[str, Any], *, fleet_size_reference: int
+) -> dict[str, Any]:
     out = dict(cfg.get("normalization", {}))
     out["position"] = {"divide_by_m": [float(cfg["env"]["region"]["lx_m"]),
                                        float(cfg["env"]["region"]["ly_m"])]}
     out["uav_queue"] = {"divide_by_bits": float(cfg["env"]["uav"]["queue_max_bits"])}
     out["hap_queue"] = {"divide_by_bits": float(cfg["env"]["hap"]["queue_max_bits"])}
+    out["resource_context"] = {
+        "fleet_size_reference": int(fleet_size_reference)
+    }
     return out
 
 

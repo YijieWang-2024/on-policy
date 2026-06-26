@@ -219,7 +219,8 @@ major-minor 共享参数 MAPPO（`onpolicy/algorithms/mec/mec_policy.py`）。�
 - UAV 轨迹已稳定学到 demand matching，W1 约为 756-765 m。
 - 三个 seed 的成本仍高于 heuristic，主要差距在 beta/队列控制。
 - HAP 轨迹只在一个 seed 中明显承重，旧回传链路预算过于宽裕。
-- 当前 actor 使用 UAV 状态均值 descriptor，critic 使用有序拼接，尚不是论文最终 SetRec。
+- 当前分支已实现对齐的 `mean/flat/set` phase-1 结构；正式三结构训练仍在进行，
+  decoder、Sinkhorn reconstruction 和 PPG auxiliary phase 尚未加入。
 
 因此，换机后的当前候选是
 `onpolicy/envs/mec/scenarios/v6_hap_loadbearing.yaml`。它保持 workload、sub-6 接入、
@@ -245,9 +246,24 @@ PYTHONPATH=$PWD python -m onpolicy.scripts.analysis.design_v6_sanity \
   --scenario v6_hap_loadbearing
 ```
 
-然后按 [`docs/mec_runbook.md`](docs/mec_runbook.md) 先做 300k-500k steps 的 3-seed
-短程确认，不直接启动最终长训练。验收必须联合检查 cost、accepted、queue、overflow、
-热点/背景 UAV 数、回传与计算利用率，以及 learned HAP freeze ablation。
+然后按 [`docs/mec_runbook.md`](docs/mec_runbook.md) 运行 350-slot 的
+`mean/flat/set` 三结构、三 seed 对照。训练 checkpoint selection 使用固定
+validation split，最终结果使用独立 held-out test split。验收必须联合检查
+cost、accepted、queue、overflow、热点/背景 UAV 数、回传与计算利用率，以及
+learned HAP freeze ablation。
+
+### 350-slot 结构实验结论（2026-06-26）
+
+`mean/flat/set x 3 seeds` 已在独立 held-out split 上完成。三者都能数值稳定训练，
+但平均 cost/slot 分别为 `4.6491/4.5822/4.6230`，acceptance 仅约
+`39%`，明显落后于启发式的 `2.0694` 和 `73.7%`。冻结 learned HAP
+几乎不影响三种策略，代表性策略中冻结 UAV 运动反而改善约 `1.4%-1.9%`。
+
+旧 role-wise `legacy_mean` checkpoint 在同一 350-slot 测试上仍达到平均
+cost/slot `2.7470`，且冻结 HAP 会恶化约 `15.2%`，所以问题不在 episode
+变长，而在新的 aligned representation/readout 路径。当前不进入
+decoder/Sinkhorn/PPG；下一步先恢复与 legacy `MLPBase` 等价的归一化、
+初始化和深度契约，再做单 seed 回归门控。
 
 ## 测试
 

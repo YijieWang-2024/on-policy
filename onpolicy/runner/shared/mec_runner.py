@@ -28,6 +28,15 @@ class MECRunner(MPERunner):
 
     def log_env(self, env_infos, total_num_steps):
         """Also surface team MEC metrics (carried on the major agent's info slot)."""
+        is_training_snapshot = any(
+            key.startswith("agent") for key in env_infos
+        )
+        if not is_training_snapshot:
+            # eval() currently supplies only its aggregate reward. Reusing
+            # _last_infos here would silently print the most recent training
+            # rollout as though it came from validation.
+            return super().log_env(env_infos, total_num_steps)
+
         keys = (
             "training_cost", "src_cost", "ovf_cost", "queue_cost",
             "energy_cost", "accepted", "offloaded", "overflow", "U_src",

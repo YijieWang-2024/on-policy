@@ -339,7 +339,28 @@ def get_config():
         "--eval_seed",
         type=int,
         default=1000,
-        help="fixed base seed for deterministic validation and best-checkpoint selection",
+        help=(
+            "fixed base seed for deterministic validation and "
+            "best-checkpoint selection; do not reuse it for final reporting"
+        ),
+    )
+    parser.add_argument(
+        "--test_seed",
+        type=int,
+        default=100000,
+        help="held-out test base seed used only after checkpoint selection",
+    )
+    parser.add_argument(
+        "--test_episodes",
+        type=int,
+        default=24,
+        help="number of held-out episodes for final MEC evaluation",
+    )
+    parser.add_argument(
+        "--test_seed_stride",
+        type=int,
+        default=13,
+        help="stride between held-out MEC test episode seeds",
     )
 
     # render parameters

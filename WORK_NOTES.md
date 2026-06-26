@@ -1,5 +1,168 @@
 # Work Notes
 
+## 2026-06-26 - Aligned MLP readout repaired; Mean/Flat training gate recovered
+
+### Root cause
+
+The poor `mean/flat/set` results from the 350-slot architecture sweep were not
+caused by the PPO runner, buffer insertion, Gymnasium autoreset handling, or
+the public-state/resource-context change.  The main regression was in the
+aligned population readout path: `FusionMLP` was a bare two-layer
+`Linear + activation` stack and did not honor the legacy MAPPO `MLPBase`
+optimization contract.
+
+Specifically, it bypassed:
+
+- `use_feature_normalization` input LayerNorm;
+- `use_orthogonal` / Xavier initialization choice;
+- configured `layer_N` hidden depth;
+- per-hidden-layer LayerNorm from `MLPLayer`.
+
+This made the aligned Mean/Flat/Set runs numerically different from the proven
+legacy `MLPBase` baseline even when the high-level MAPPO algorithm was
+unchanged.
+
+### Fix
+
+- `onpolicy/algorithms/mec/set_networks.py`: `FusionMLP` now wraps the same
+  `MLPLayer` contract as `MLPBase`, with optional input LayerNorm.
+- `onpolicy/algorithms/mec/mec_policy.py`: aligned actor readouts and team
+  critic readout now pass `layer_N`, `use_orthogonal`, and
+  `use_feature_normalization`.
+- `onpolicy/algorithms/mec/tests/test_set_mec_policy.py`: added a regression
+  test locking the readout contract.
+
+### Verification
+
+- Focused policy/buffer/env tests: `25 passed, 20 subtests passed`.
+- Full suite: `57 passed, 1 skipped, 20 subtests passed`.
+- `compileall` passed.
+- `git diff --check` passed, aside from expected LF/CRLF warnings.
+
+### 350-slot one-seed regression gate after the fix
+
+Both gates used seed 1, 350-slot episodes, 16 rollout workers, 160 PPO updates,
+896k environment steps, validation seed 1000 for best-checkpoint selection, and
+held-out test seed 100000 / stride 13 / 24 episodes for reporting.
+
+| architecture | held-out cost/slot | accept | W1 diagnostic | HAP-freeze delta |
+|---|---:|---:|---:|---:|
+| mean, fixed readout | 3.2557 | 59.4% | 919.1 m | +2.2% |
+| flat, fixed readout | 2.9574 | 62.6% | 883.9 m | -0.2% |
+| legacy_mean reference, previous 3-seed mean | 2.7470 | 65.4% | 767.9 m | +15.2% |
+| heuristic reference | 2.0694 | 73.7% | 734.1 m | n/a |
+
+Training curves recovered clearly:
+
+- Mean validation improved from about `-1519` early to `-1107` at 896k.
+- Flat validation improved from about `-1484` early to `-986` at 896k.
+- PPO diagnostics stayed healthy: approximate KL remained small after the
+  first update, clip fraction did not explode, and explained variance reached
+  about `0.98-0.99`.
+
+### Decision
+
+Mean and Flat are now using MAPPO correctly enough to learn.  Flat is close to
+the historical `legacy_mean` reference, while Mean remains weaker but no longer
+collapses.  The next step is not decoder/Sinkhorn/PPG yet; first run the fixed
+`set` seed-1 gate, then rerun the formal 3-seed Mean/Flat/Set comparison if Set
+also shows recovered movement.
+
+## 2026-06-26 - 350-slot aligned architecture experiment completed
+
+### Formal protocol
+
+- Completed `mean/flat/set x seed 1/2/3` with 350-slot episodes,
+  16 rollout workers, 160 PPO updates, and 896,000 environment steps per run.
+- Best-checkpoint selection used only validation seed 1000 over 24 episodes.
+- Final reporting used the disjoint held-out split with base seed 100000,
+  stride 13, and 24 episodes.
+- All nine training runs and held-out evaluations completed without stderr.
+
+### Held-out result
+
+| architecture | cost/slot | accept | spatial diagnostic | HAP-freeze delta |
+|---|---:|---:|---:|---:|
+| mean | 4.6491 +/- 0.1292 | 38.9% +/- 1.5% | 1285.7 +/- 14.6 m | -0.3% +/- 0.5% |
+| flat | 4.5822 +/- 0.0900 | 39.7% +/- 1.2% | 1260.9 +/- 32.9 m | approximately 0% |
+| set | 4.6230 +/- 0.0669 | 39.1% +/- 0.9% | 1287.0 +/- 9.3 m | approximately 0% |
+| heuristic | 2.0694 | 73.7% | 734.1 m | n/a |
+
+The Set policy is numerically stable across seeds, but task performance is not
+ready for reconstruction: acceptance remains below 40%, the learned HAP
+trajectory is not load-bearing, and the spatial diagnostic does not improve
+meaningfully over hover.
+
+### Regression localization
+
+- Representative action ablations show that freezing learned UAV motion
+  improves cost by 1.4% to 1.9%. Mean UAV velocity has a negative projection
+  toward the hotspot, and mean HAP velocity has a negative projection toward
+  the UAV centroid.
+- Historical role-wise `legacy_mean` checkpoints were evaluated unchanged on
+  the same 350-slot held-out split. They achieve cost/slot
+  `2.5610/2.8504/2.8297`, acceptance `67.9%/64.2%/64.1%`, and HAP-freeze
+  degradation `+19.4%/+10.2%/+16.0%`.
+- Therefore the longer horizon is not the cause. The regression is in the new
+  aligned representation/readout path.
+- The new `FusionMLP` path bypasses the configured input feature
+  normalization, per-layer normalization, orthogonal initialization, and
+  `layer_N` depth used by the proven legacy `MLPBase`. This is the first
+  architecture contract to repair and ablate.
+
+### Decision
+
+Do not add the decoder, Sinkhorn reconstruction loss, or PPG auxiliary phase
+yet. First restore an optimization-equivalent normalized actor/critic readout,
+then rerun a one-seed regression gate against `legacy_mean`; only after the
+aligned Set policy recovers useful UAV and HAP motion should the three-seed
+comparison be repeated.
+
+## 2026-06-26 - 350-slot aligned architecture experiment launch
+
+### Decisions
+
+- The nearest-UAV spatial diagnostic remains an environment-design metric; it
+  is not the future decoder's Sinkhorn reconstruction objective.
+- Beta sensitivity is deferred to its dedicated mildly overloaded scenario and
+  does not block the current representation experiment.
+- The training horizon is increased from 200 to 350 slots. With 16 rollout
+  threads, the budget is increased from 512k to 896k environment steps so each
+  run retains 160 PPO updates.
+- Checkpoint selection uses a fixed validation split (`base_seed=1000`,
+  24 episodes). Final structure reporting uses a disjoint held-out split
+  (`base_seed=100000`, stride 13, 24 episodes).
+
+### Information contract
+
+The public state now contains the seven physical HAP/demand features plus six
+dimensionless fleet/resource features:
+
+```text
+K/K_ref,
+W_ac,i/W_ac,total,
+W_bh,i/W_bh,total,
+K*C_U/(K*C_U+C_H),
+C_H/(K*C_U+C_H),
+(K*C_U+C_H)/D_ref.
+```
+
+Canonical local rows are 17-D and centralized state is `13 + 3K`. Historical
+14-D checkpoints remain supported through the legacy adapter, which discards
+the new resource context when reconstructing historical rows.
+
+### Verification and launch
+
+- Focused and full suites passed: `53 passed, 1 skipped, 20 subtests passed`.
+- Parallel 350-slot Mean/Flat/Set smoke completed training, validation
+  checkpointing, and held-out JSON evaluation.
+- Workstation calibration: three concurrent runs use about 4.5 GB GPU memory;
+  CPU, rather than GPU memory, is the limiting resource.
+- Formal `mean/flat/set x seed 1/2/3` experiments are running in three waves
+  through `scripts/run_v6_h350_arch_parallel.ps1`.
+- `summarize_h350_arch.py` produces cross-seed statistics and explicit
+  reconstruction-readiness gates after held-out evaluation.
+
 ## 2026-06-26 - Phase archive: aligned MEC population policies
 
 ### Archived scope

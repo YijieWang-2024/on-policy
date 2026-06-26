@@ -121,18 +121,20 @@ PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
 
 新的 `mean/flat/set` 都使用完整 team group 和同一套 role-specific
 actor/team critic；只替换 population representation。环境局部观测为
-`[role, own(3), p(7)]`，runner 生成 centralized state
-`[p(7), s_1(3), ..., s_K(3)]`。旧模型若 config 中没有
+`[role, own(3), p_phys(7), resource(6)]`，runner 生成 centralized state
+`[p(13), s_1(3), ..., s_K(3)]`。旧模型若 config 中没有
 `mec_policy_arch`，加载脚本会自动选择 `legacy_mean`。
 
-## 5. 3-seed 结构对照训练
+## 5. 350-slot、3-seed 结构对照训练
 
 旧 mean-descriptor MAPPO 已完成，但不属于严格对齐的表示消融。新的
-`mean/flat/set` 应使用相同预算、role-wise loss、step checkpoint 和固定验证集：
+`mean/flat/set` 使用相同预算、role-wise loss、step checkpoint 和固定验证集。
+旧 200-slot、16-thread、512k 配置共有 160 次 PPO 更新。350-slot 保持
+16 threads 和 160 次更新，对应 `896000` environment steps：
 
 ```bash
 SCENARIO=v6_hap_loadbearing
-STEPS=512000
+STEPS=896000
 SEED=1
 ARCH=set
 EXP=v6_hap_lb_${ARCH}_seed${SEED}
@@ -142,10 +144,11 @@ PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
   --experiment_name $EXP \
   --mec_scenario $SCENARIO \
   --mec_policy_arch $ARCH \
+  --mec_episode_horizon 350 \
   --seed $SEED \
   --n_rollout_threads 16 --n_training_threads 2 \
   --n_eval_rollout_threads 8 \
-  --episode_length 200 --num_env_steps $STEPS \
+  --episode_length 350 --num_env_steps 896000 \
   --ppo_epoch 5 --num_mini_batch 1 \
   --hidden_size 128 --layer_N 2 \
   --use_entropy_anneal --mec_logstd_init -1.9 --entropy_coef 0.003 \
@@ -157,7 +160,31 @@ PYTHONPATH=$PWD python -u -m onpolicy.scripts.train.train_mec \
   2>&1 | tee ${EXP}.log
 ```
 
-依次运行 seed 1/2/3。机器资源允许时可以并行，但先确认单个 run 的显存和 CPU 占用。
+RTX 3090 / Ryzen 5950X 工作站上最多并行 3 个 run；九个实验分三波运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  scripts\run_v6_h350_arch_parallel.ps1
+```
+
+脚本在每个 seed 内并行 `mean/flat/set`，并在所有训练结束后自动运行独立
+held-out test。
+
+### 2026-06-26 已完成结果
+
+```text
+architecture  cost/slot       accept          W1 diagnostic    HAP-freeze
+mean          4.6491+/-0.1292  38.9+/-1.5%    1285.7+/-14.6 m  -0.3+/-0.5%
+flat          4.5822+/-0.0900  39.7+/-1.2%    1260.9+/-32.9 m  approximately 0%
+set           4.6230+/-0.0669  39.1+/-0.9%    1287.0+/-9.3 m   approximately 0%
+heuristic     2.0694           73.7%           734.1 m          n/a
+```
+
+九个 run 均完成且无 stderr，说明三种实现没有数值崩溃；但控制质量未通过
+reconstruction gate。旧 `legacy_mean` checkpoint 在同一 350-slot held-out
+split 上平均 cost/slot 为 `2.7470`，冻结 HAP 平均恶化 `15.2%`，因此下一轮
+应先定位 aligned actor/critic readout 的优化回归，而不是继续增加
+decoder/Sinkhorn/PPG。
 
 结果目录：
 
@@ -207,7 +234,20 @@ ssh -N -L 6006:localhost:6006 user@gpu-host
 
 ## 7. 统一评估
 
-三个 seed 必须使用相同测试 seed 和 episode 数。
+训练中的 best checkpoint 只使用 validation split：
+
+```text
+validation base seed = 1000
+validation episodes = 24
+```
+
+最终报告使用不参与模型选择的 held-out split：
+
+```text
+test base seed = 100000
+test stride = 13
+test episodes = 24
+```
 
 ```bash
 RUN=onpolicy/scripts/results/MEC/v6_hap_loadbearing/mappo/v6_hap_lb_probe_seed1/run1
@@ -215,8 +255,9 @@ RUN=onpolicy/scripts/results/MEC/v6_hap_loadbearing/mappo/v6_hap_lb_probe_seed1/
 PYTHONPATH=$PWD python -m onpolicy.scripts.eval.eval_mec \
   --env_name MEC \
   --mec_eval_controller policy \
-  --model_dir $RUN/models \
-  --seed 1000 \
+  --model_dir $RUN/models/best \
+  --mec_eval_seed 100000 \
+  --mec_eval_seed_stride 13 \
   --mec_eval_episodes 24
 ```
 
@@ -226,8 +267,10 @@ PYTHONPATH=$PWD python -m onpolicy.scripts.eval.eval_mec \
 PYTHONPATH=$PWD python -m onpolicy.scripts.eval.eval_mec \
   --env_name MEC \
   --mec_scenario v6_hap_loadbearing \
+  --mec_episode_horizon 350 \
   --mec_eval_controller heuristic \
-  --seed 1000 \
+  --mec_eval_seed 100000 \
+  --mec_eval_seed_stride 13 \
   --mec_eval_episodes 24
 ```
 

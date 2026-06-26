@@ -19,9 +19,13 @@ except Exception:  # pragma: no cover
 from onpolicy.envs.mec.config_loader import load_scenario
 from onpolicy.envs.mec.finite_k_env import FiniteKHAPUAVMECEnv
 from onpolicy.envs.mec.metrics import demand_matching_w1
-from onpolicy.envs.mec.observation import AGENT_OBS_DIM, team_state_dim
+from onpolicy.envs.mec.observation import (
+    AGENT_OBS_DIM,
+    build_resource_context,
+    team_state_dim,
+)
 
-OBS_DIM = AGENT_OBS_DIM  # role(1) + own(3) + public HAP/demand state(7)
+OBS_DIM = AGENT_OBS_DIM
 ACT_DIM = 3   # [vx, vy, beta_raw]; major ignores beta_raw
 
 
@@ -32,12 +36,19 @@ class MECEnv:
         scenario = getattr(all_args, "mec_scenario", "v2_iort_6km_mmwave")
         k_override = getattr(all_args, "mec_fleet_size", None)
         self.cfg = load_scenario(scenario, fleet_size_k=k_override)
+        horizon_override = getattr(all_args, "mec_episode_horizon", None)
+        if horizon_override is not None:
+            horizon_override = int(horizon_override)
+            if horizon_override <= 0:
+                raise ValueError("mec_episode_horizon must be positive")
+            self.cfg["base"]["episode_horizon_slots"] = horizon_override
         self.env = FiniteKHAPUAVMECEnv(self.cfg)
 
         self.k = int(self.cfg["env"]["fleet_size_k"])
         self.num_agents = self.k + 1
         self.v_h_max = float(self.cfg["env"]["hap"]["velocity_max_mps"])
         self.v_u_max = float(self.cfg["env"]["uav"]["velocity_max_mps"])
+        self.resource_context = build_resource_context(self.cfg)
 
         obs_box = spaces.Box(-np.inf, np.inf, (OBS_DIM,), dtype=np.float32)
         share_box = spaces.Box(
@@ -85,12 +96,13 @@ class MECEnv:
         uav = obs["normalized"]["uavs"]           # (K, 3): [xy(2), q(1)]
         hub_pub = hub[:3]                         # hub xy + queue
         demand = hub[3:7]                         # demand center + velocity
+        public = np.concatenate([hub_pub, demand, self.resource_context])
         rows = np.zeros((self.num_agents, OBS_DIM), dtype=np.float32)
         # agent 0 = major: own block = hub state
-        rows[0] = np.concatenate([[1.0], hub_pub, hub_pub, demand])
+        rows[0] = np.concatenate([[1.0], hub_pub, public])
         # agents 1..K = minors: own block = own UAV state
         for i in range(self.k):
-            rows[i + 1] = np.concatenate([[0.0], uav[i], hub_pub, demand])
+            rows[i + 1] = np.concatenate([[0.0], uav[i], public])
         return rows
 
     def _agent_infos(self, info: dict[str, Any], reward: float) -> list[dict]:

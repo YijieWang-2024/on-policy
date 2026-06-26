@@ -27,6 +27,8 @@ from onpolicy.envs.mec.observation import (
     AGENT_OBS_DIM,
     LEGACY_AGENT_OBS_DIM,
     OWN_SLICE,
+    PHYSICAL_PUBLIC_SLICE,
+    PHYSICAL_PUBLIC_STATE_DIM,
     PUBLIC_SLICE,
     PUBLIC_STATE_DIM,
     ROLE_INDEX,
@@ -193,7 +195,15 @@ def _canonical_to_legacy_rows(obs, num_agents, tpdv):
     team = obs.reshape(-1, num_agents, AGENT_OBS_DIM)
     mean = team[:, 1:, _OWN].mean(dim=1, keepdim=True)
     mean = mean.expand(-1, num_agents, -1)
-    return torch.cat([team, mean], dim=-1).reshape(
+    historical_rows = torch.cat(
+        [
+            team[:, :, :_OWN.stop],
+            team[:, :, PHYSICAL_PUBLIC_SLICE],
+            mean,
+        ],
+        dim=-1,
+    )
+    return historical_rows.reshape(
         -1, LEGACY_AGENT_OBS_DIM
     )
 
@@ -292,7 +302,7 @@ class MECLegacyMeanCritic(R_Critic):
             -1, self.num_agents, self.canonical_state_dim
         )
         state = grouped[:, 0]
-        public = state[:, :PUBLIC_STATE_DIM]
+        public = state[:, :PHYSICAL_PUBLIC_STATE_DIM]
         uavs = state[:, PUBLIC_STATE_DIM:].reshape(
             -1, self.num_uavs, UAV_STATE_DIM
         )
@@ -555,6 +565,9 @@ class _PopulationActor(_GroupedRoleActor):
             PUBLIC_STATE_DIM + self.representation_dim,
             self.hidden_size,
             use_relu,
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
         )
         self.minor_fusion = FusionMLP(
             UAV_STATE_DIM
@@ -562,6 +575,9 @@ class _PopulationActor(_GroupedRoleActor):
             + self.representation_dim,
             self.hidden_size,
             use_relu,
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
         )
         self.to(device)
 
@@ -741,6 +757,9 @@ class MECTeamCritic(nn.Module):
             PUBLIC_STATE_DIM + representation_dim,
             self.hidden_size,
             use_relu,
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
         )
 
         init_method = [

@@ -6,12 +6,62 @@ import numpy as np
 
 ROLE_INDEX = 0
 OWN_SLICE = slice(1, 4)
-PUBLIC_SLICE = slice(4, 11)
 
 UAV_STATE_DIM = 3
-PUBLIC_STATE_DIM = 7
-AGENT_OBS_DIM = 11
+PHYSICAL_PUBLIC_STATE_DIM = 7
+RESOURCE_CONTEXT_DIM = 6
+PUBLIC_STATE_DIM = PHYSICAL_PUBLIC_STATE_DIM + RESOURCE_CONTEXT_DIM
+PHYSICAL_PUBLIC_SLICE = slice(4, 4 + PHYSICAL_PUBLIC_STATE_DIM)
+RESOURCE_CONTEXT_SLICE = slice(
+    PHYSICAL_PUBLIC_SLICE.stop,
+    PHYSICAL_PUBLIC_SLICE.stop + RESOURCE_CONTEXT_DIM,
+)
+PUBLIC_SLICE = slice(4, 4 + PUBLIC_STATE_DIM)
+AGENT_OBS_DIM = 1 + UAV_STATE_DIM + PUBLIC_STATE_DIM
 LEGACY_AGENT_OBS_DIM = 14
+
+
+def build_resource_context(cfg: dict) -> np.ndarray:
+    """Return dimensionless fleet/resource parameters shared by every agent.
+
+    The context makes cardinality and K-dependent resource scaling explicit to
+    fixed-width population policies. The reference fleet size is the scenario's
+    native K before any fleet-size override.
+    """
+    k = int(cfg["env"]["fleet_size_k"])
+    norm = cfg["normalization"]["resource_context"]
+    k_ref = max(float(norm["fleet_size_reference"]), 1.0)
+
+    access = cfg["communication"]["access"]
+    access_per = float(access["bandwidth_per_uav_hz"])
+    access_total = float(access.get("total_bandwidth_hz", access_per * k))
+    mmwave = cfg["communication"]["backhaul"]["mmwave"]
+    backhaul_per = float(mmwave["beam_bandwidth_hz"])
+    backhaul_total = float(
+        mmwave.get("total_bandwidth_hz", backhaul_per * k)
+    )
+
+    uav_compute = (
+        k * float(cfg["derived"]["uav_compute_capacity_bits"])
+    )
+    hap_compute = float(cfg["derived"]["hap_compute_capacity_bits"])
+    total_compute = max(uav_compute + hap_compute, 1e-12)
+    loss_ref = max(
+        float(cfg["cost"]["references"]["loss_ref_bits_per_slot"]),
+        1e-12,
+    )
+
+    return np.asarray(
+        [
+            k / k_ref,
+            access_per / max(access_total, 1e-12),
+            backhaul_per / max(backhaul_total, 1e-12),
+            uav_compute / total_compute,
+            hap_compute / total_compute,
+            total_compute / loss_ref,
+        ],
+        dtype=np.float32,
+    )
 
 
 def team_state_dim(num_agents: int) -> int:

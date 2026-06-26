@@ -808,8 +808,8 @@ grouped batch、训练 smoke、checkpoint restore 和 policy eval。下一步是
 
 为避免把 actor/critic 结构差异误解释为 descriptor 效果，当前环境和算法接口调整为：
 
-- local observation：`[role, own(3), p(7)]`；
-- centralized state：`[p(7), s_1(3), ..., s_K(3)]`；
+- local observation：`[role, own(3), p_phys(7), resource(6)]`；
+- centralized state：`[p(13), s_1(3), ..., s_K(3)]`；
 - aligned mean：HAP `p+mean`，UAV `s_i+p+mean`，critic `p+mean`；
 - flat/set 使用完全相同的 role-specific fusion、action heads、team critic 和
   grouped PPO，仅分别把 representation 换成 ordered concat 或 invariant `xi`。

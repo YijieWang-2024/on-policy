@@ -227,10 +227,13 @@ class Runner(object):
         metadata = {
             "selection_metric": "eval_average_episode_rewards",
             "selection_mode": "max",
+            "selection_split": "validation",
             "eval_reward": self.best_eval_reward,
             "total_num_steps": int(total_num_steps),
-            "eval_seed": int(getattr(self.all_args, "eval_seed", 1000)),
-            "eval_episodes": int(self.all_args.eval_episodes),
+            "validation_seed": int(
+                getattr(self.all_args, "eval_seed", 1000)
+            ),
+            "validation_episodes": int(self.all_args.eval_episodes),
         }
         with (best_dir / "best_checkpoint.json").open(
             "w", encoding="utf-8"

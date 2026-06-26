@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from onpolicy.algorithms.utils.mlp import MLPLayer
+
 
 def _activation(use_relu: bool) -> nn.Module:
     return nn.ReLU() if use_relu else nn.Tanh()
@@ -98,18 +100,42 @@ class PopulationEncoder(nn.Module):
 
 
 class FusionMLP(nn.Module):
-    """Small role-specific MLP shared by aligned MEC architectures."""
+    """Role-specific MLP shared by aligned MEC architectures.
+
+    Keep the same optimization contract as the legacy MAPPO ``MLPBase``:
+    optional input LayerNorm, configured orthogonal/Xavier initialization,
+    ``layer_N`` hidden blocks, and per-hidden-layer LayerNorm.  The aligned
+    Mean/Flat/Set policies differ in what population descriptor they feed into
+    this readout, not in the basic PPO-friendly MLP numerics.
+    """
 
     def __init__(
-        self, input_dim: int, hidden_dim: int, use_relu: bool
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        use_relu: bool,
+        *,
+        layer_N: int = 1,
+        use_orthogonal: bool = True,
+        use_feature_normalization: bool = True,
     ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            _activation(use_relu),
-            nn.Linear(hidden_dim, hidden_dim),
-            _activation(use_relu),
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self._use_feature_normalization = bool(
+            use_feature_normalization
+        )
+        if self._use_feature_normalization:
+            self.feature_norm = nn.LayerNorm(self.input_dim)
+        self.mlp = MLPLayer(
+            self.input_dim,
+            self.hidden_dim,
+            int(layer_N),
+            bool(use_orthogonal),
+            bool(use_relu),
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.net(features)
+        if self._use_feature_normalization:
+            features = self.feature_norm(features)
+        return self.mlp(features)

@@ -58,14 +58,24 @@ def parse_args(args, parser):
                         help="scenario yaml name under onpolicy/envs/mec/scenarios")
     parser.add_argument("--mec_fleet_size", type=int, default=None,
                         help="override K (UAV count); num_agents becomes K+1")
+    parser.add_argument(
+        "--mec_episode_horizon",
+        type=int,
+        default=None,
+        help=(
+            "override the MEC scenario horizon; must equal --episode_length "
+            "so each rollout is one complete environment episode"
+        ),
+    )
     return parser.parse_known_args(args)[0]
 
 
-def _probe_num_agents(all_args):
+def _probe_env_contract(all_args):
     probe = MECEnv(all_args)
     n = probe.num_agents
+    horizon = probe.env.horizon
     probe.close()
-    return n
+    return n, horizon
 
 
 def main(args):
@@ -126,7 +136,14 @@ def main(args):
     np.random.seed(all_args.seed)
     random.seed(all_args.seed)
 
-    num_agents = _probe_num_agents(all_args)        # D6: K+1 from the scenario
+    num_agents, env_horizon = _probe_env_contract(all_args)
+    if int(all_args.episode_length) != int(env_horizon):
+        raise ValueError(
+            "--episode_length must match the MEC environment horizon: "
+            f"episode_length={all_args.episode_length}, "
+            f"environment_horizon={env_horizon}. Pass both "
+            "--episode_length and --mec_episode_horizon when changing it."
+        )
     all_args.num_agents = num_agents
     all_args.scenario_name = all_args.mec_scenario   # base runner logs scenario_name
 

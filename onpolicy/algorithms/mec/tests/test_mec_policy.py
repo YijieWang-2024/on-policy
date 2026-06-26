@@ -27,9 +27,15 @@ except Exception:
 
 from onpolicy.algorithms.mec.mec_policy import MECActor, MECPolicy   # noqa: E402
 from onpolicy.algorithms.r_mappo.algorithm.r_actor_critic import R_Critic  # noqa: E402
-from onpolicy.envs.mec.observation import team_state_dim  # noqa: E402
+from onpolicy.envs.mec.observation import (  # noqa: E402
+    AGENT_OBS_DIM,
+    PHYSICAL_PUBLIC_STATE_DIM,
+    PUBLIC_STATE_DIM,
+    team_state_dim,
+)
 
 OBS_DIM, ACT_DIM, N_ENV, K = 14, 3, 4, 8
+CANONICAL_OBS_DIM = AGENT_OBS_DIM
 N = K + 1
 
 
@@ -122,7 +128,9 @@ def test_gradients_flow_to_both_heads():
 
 
 def test_policy_builds_and_acts():
-    obs_space = spaces.Box(-np.inf, np.inf, (11,), np.float32)
+    obs_space = spaces.Box(
+        -np.inf, np.inf, (CANONICAL_OBS_DIM,), np.float32
+    )
     act_space = spaces.Box(-1.0, 1.0, (ACT_DIM,), np.float32)
     share_space = spaces.Box(
         -np.inf, np.inf, (team_state_dim(N),), np.float32
@@ -132,16 +140,18 @@ def test_policy_builds_and_acts():
         torch.device("cpu"), num_agents=N
     )
     rng = np.random.default_rng(4)
-    obs = rng.normal(size=(N_ENV, N, 11)).astype(np.float32)
+    obs = rng.normal(
+        size=(N_ENV, N, CANONICAL_OBS_DIM)
+    ).astype(np.float32)
     obs[:, 0, 0] = 1.0
     obs[:, 1:, 0] = 0.0
-    public = obs[:, 0, 4:11]
-    obs[:, :, 4:11] = public[:, None]
+    public = obs[:, 0, 4:4 + PUBLIC_STATE_DIM]
+    obs[:, :, 4:4 + PUBLIC_STATE_DIM] = public[:, None]
     state = np.concatenate(
         [public, obs[:, 1:, 1:4].reshape(N_ENV, -1)], axis=-1
     )
     cent = np.repeat(state[:, None], N, axis=1)
-    obs = obs.reshape(N_ENV * N, 11)
+    obs = obs.reshape(N_ENV * N, CANONICAL_OBS_DIM)
     cent = cent.reshape(N_ENV * N, -1)
     rnn = np.zeros((N_ENV * N, 1, 64), np.float32)
     rnn_c = np.zeros((N_ENV * N, 1, 64), np.float32)
@@ -169,7 +179,7 @@ def test_legacy_adapter_loads_historical_actor_and_critic_exactly():
     )
 
     canonical_obs_space = spaces.Box(
-        -np.inf, np.inf, (11,), np.float32
+        -np.inf, np.inf, (CANONICAL_OBS_DIM,), np.float32
     )
     canonical_share_space = spaces.Box(
         -np.inf, np.inf, (team_state_dim(N),), np.float32
@@ -187,16 +197,25 @@ def test_legacy_adapter_loads_historical_actor_and_critic_exactly():
 
     rng = np.random.default_rng(8)
     canonical = rng.normal(
-        size=(N_ENV, N, 11)
+        size=(N_ENV, N, CANONICAL_OBS_DIM)
     ).astype(np.float32)
     canonical[:, 0, 0] = 1.0
     canonical[:, 1:, 0] = 0.0
-    public = canonical[:, 0, 4:11].copy()
-    canonical[:, :, 4:11] = public[:, None]
+    public = canonical[:, 0, 4:4 + PUBLIC_STATE_DIM].copy()
+    canonical[:, :, 4:4 + PUBLIC_STATE_DIM] = public[:, None]
     canonical[:, 0, 1:4] = public[:, :3]
     mean = canonical[:, 1:, 1:4].mean(axis=1)
     legacy = np.concatenate(
-        [canonical, np.repeat(mean[:, None], N, axis=1)], axis=-1
+        [
+            canonical[:, :, :4],
+            canonical[
+                :,
+                :,
+                4:4 + PHYSICAL_PUBLIC_STATE_DIM,
+            ],
+            np.repeat(mean[:, None], N, axis=1),
+        ],
+        axis=-1,
     )
     canonical_state = np.concatenate(
         [public, canonical[:, 1:, 1:4].reshape(N_ENV, -1)],
@@ -220,7 +239,7 @@ def test_legacy_adapter_loads_historical_actor_and_critic_exactly():
             deterministic=True,
         )
         new_actions, _ = policy.act(
-            canonical.reshape(-1, 11),
+            canonical.reshape(-1, CANONICAL_OBS_DIM),
             rnn,
             masks,
             deterministic=True,

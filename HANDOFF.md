@@ -30,8 +30,8 @@
 本轮进一步确认：旧 mean 基线同时使用了共享 actor trunk 和有序 centralized
 critic，不能作为只比较 population representation 的严格对照。因此当前代码契约为：
 
-- 环境局部观测统一为 `[role, own(3), p(7)]`，共 11 维；
-- runner 统一构造 `[p(7), s_1(3), ..., s_K(3)]` centralized state；
+- 环境局部观测统一为 `[role, own(3), p_phys(7), resource(6)]`，共 17 维；
+- runner 统一构造 `[p(13), s_1(3), ..., s_K(3)]` centralized state；
 - 新 `mean/flat/set` 的 HAP actor、共享 UAV actor、team critic 和 grouped PPO
   完全一致，只替换 population representation；
 - `mean` 输入分别为 `p+mean`、`s_i+p+mean`、`p+mean`；
@@ -73,8 +73,10 @@ critic，不能作为只比较 population representation 的严格对照。因�
 - 论文最终 5-seed、跨 K 和统计置信区间实验。
 
 当前不应直接跑论文最终实验。beta 诊断暂不作为主线阻塞条件。Set-MAPPO
-第一阶段的结构正确性已经通过测试；下一步进行 `mean/flat/set` 同预算三 seed
-对照，reconstruction 只在 Set-MAPPO 稳定后加入。
+第一阶段的结构正确性已经通过测试；当前执行 350-slot、同预算
+`mean/flat/set` 三 seed 对照。best checkpoint 使用 validation seed 1000，
+最终报告改用 held-out test seed 100000。reconstruction 只在 Set-MAPPO
+稳定后加入。
 
 ## 2. `v6_hap_loadbearing` 短程确认与 role-wise 对照
 
@@ -247,3 +249,55 @@ v6_hap_lb_probe_seed3
 
 没有删除 Markdown：现有文件职责仍然不同，历史失败证据也仍用于解释场景
 演进。后续不再把当前算法设计继续堆进历史环境规范。
+
+## 9. 2026-06-26：350-slot 三结构实验最终结论
+
+正式 `mean/flat/set x seed 1/2/3` 已全部完成。每个 run 使用 350 slots、
+16 rollout workers、160 次 PPO 更新和 896k environment steps；validation
+仅用于选择 best checkpoint，最终结果来自独立的 seed 100000 held-out split。
+
+| 架构 | cost/slot | acceptance | W1 诊断 | 冻结 HAP |
+|---|---:|---:|---:|---:|
+| Mean | 4.6491 +/- 0.1292 | 38.9% +/- 1.5% | 1285.7 +/- 14.6 m | -0.3% +/- 0.5% |
+| Flat | 4.5822 +/- 0.0900 | 39.7% +/- 1.2% | 1260.9 +/- 32.9 m | 约 0% |
+| Set | 4.6230 +/- 0.0669 | 39.1% +/- 0.9% | 1287.0 +/- 9.3 m | 约 0% |
+| heuristic | 2.0694 | 73.7% | 734.1 m | - |
+
+Set 的跨 seed 方差最小，说明代码可以稳定优化；但三种策略都没有学出有效的
+轨迹控制。代表性 checkpoint 中，冻结 UAV 运动反而降低成本约 1.4%-1.9%，
+UAV 平均速度背离热点，HAP 平均速度背离 UAV 质心。
+
+旧 role-wise `legacy_mean` checkpoint 在完全相同的 350-slot held-out split
+上仍达到 cost/slot `2.5610/2.8504/2.8297`，acceptance `67.9%/64.2%/64.1%`，
+冻结 HAP 会恶化 `19.4%/10.2%/16.0%`。因此 episode 延长不是根因，回归来自
+新的 aligned representation/readout 路径。
+
+当前决定：不进入 decoder、Sinkhorn reconstruction 或 PPG auxiliary phase。
+下一步先修复 aligned `FusionMLP` 与 legacy `MLPBase` 不等价的问题：
+它目前没有遵守 `use_feature_normalization`、`use_orthogonal`、`layer_N`，
+也缺少 legacy trunk 的逐层 LayerNorm。修复后先做一个 seed 的
+`legacy_mean/mean/flat/set` 回归门控；只有恢复有效 UAV/HAP 运动后，才重跑
+三 seed 并进入 reconstruction。
+
+## 10. 2026-06-26: aligned readout repair gate
+
+The `FusionMLP` regression was repaired. The aligned readouts now follow the
+legacy MAPPO `MLPBase` contract: input LayerNorm when enabled, configured
+orthogonal/Xavier initialization, configured `layer_N`, and per-hidden-layer
+LayerNorm.
+
+Seed-1 full 350-slot gates now recover normal learning:
+
+| architecture | held-out cost/slot | acceptance | W1 | HAP freeze |
+|---|---:|---:|---:|---:|
+| Mean, fixed readout | 3.2557 | 59.4% | 919.1 m | +2.2% |
+| Flat, fixed readout | 2.9574 | 62.6% | 883.9 m | -0.2% |
+
+The PPO framework, grouped minibatch path, environment output contract, and
+validation/test split passed regression tests. Full verification:
+`57 passed, 1 skipped, 20 subtests passed`; `compileall` and
+`git diff --check` passed.
+
+Next step: run the fixed Set seed-1 350-slot gate before adding decoder,
+Sinkhorn reconstruction, or PPG. If Set also recovers, rerun the formal
+3-seed Mean/Flat/Set comparison with the repaired readout.

@@ -2,7 +2,7 @@ param(
     [int]$WaitForPid = 0,
     [int[]]$Seeds = @(1, 2, 3),
     [int]$Episodes = 24,
-    [int]$EvalSeed = 1000,
+    [int]$EvalSeed = 100000,
     [string]$ExperimentPrefix = "v6_hap_lb_probe_seed"
 )
 
@@ -41,7 +41,7 @@ foreach ($Seed in $Seeds) {
         --env_name MEC `
         --mec_eval_controller policy `
         --model_dir $ModelDir `
-        --seed $EvalSeed `
+        --mec_eval_seed $EvalSeed `
         --mec_eval_episodes $Episodes 2>&1 |
         Tee-Object -FilePath $EvalLog
 
@@ -55,7 +55,7 @@ $HeuristicLog = Join-Path $LogDir "v6_hap_loadbearing_heuristic.eval.log"
     --env_name MEC `
     --mec_scenario v6_hap_loadbearing `
     --mec_eval_controller heuristic `
-    --seed $EvalSeed `
+    --mec_eval_seed $EvalSeed `
     --mec_eval_episodes $Episodes 2>&1 |
     Tee-Object -FilePath $HeuristicLog
 

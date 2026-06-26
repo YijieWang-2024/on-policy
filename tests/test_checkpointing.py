@@ -70,7 +70,8 @@ def test_step_and_best_checkpoints_are_retained_and_restorable(tmp_path):
         (best / "best_checkpoint.json").read_text(encoding="utf-8")
     )
     assert metadata["total_num_steps"] == 3200
-    assert metadata["eval_seed"] == 1000
+    assert metadata["selection_split"] == "validation"
+    assert metadata["validation_seed"] == 1000
     assert not runner.maybe_save_best(-6.0, 6400)
 
     with torch.no_grad():

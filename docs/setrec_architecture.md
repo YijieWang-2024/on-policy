@@ -17,21 +17,37 @@ s_i = [x_i / L_x, y_i / L_y, Q_i / Q_U_max].
 The public HAP/demand state is
 
 ```text
-p = [y_x / L_x, y_y / L_y, Q_H / Q_H_max,
-     c_x / L_x, c_y / L_y, c_dot_x / V_ref, c_dot_y / V_ref].
+p_phys = [y_x / L_x, y_y / L_y, Q_H / Q_H_max,
+          c_x / L_x, c_y / L_y, c_dot_x / V_ref, c_dot_y / V_ref].
 ```
 
-The environment emits an 11-dimensional local row:
+The fixed-width fleet/resource context is
 
 ```text
-[role, own(3), p(7)].
+r = [K / K_ref,
+     W_ac,i / W_ac,total,
+     W_bh,i / W_bh,total,
+     K C_U / (K C_U + C_H),
+     C_H / (K C_U + C_H),
+     (K C_U + C_H) / D_ref].
+```
+
+`K_ref` is the scenario's native fleet size before a fleet-size override.
+The public state is `p = [p_phys(7), r(6)]`. Making cardinality and resource
+scaling explicit is required because normalized attention pooling alone cannot
+in general recover multiplicity.
+
+The environment emits a 17-dimensional local row:
+
+```text
+[role, own(3), p(13)].
 ```
 
 The MEC runner constructs one canonical centralized state and repeats it across
 the `K+1` buffer rows:
 
 ```text
-[p(7), s_1(3), ..., s_K(3)].
+[p(13), s_1(3), ..., s_K(3)].
 ```
 
 No population descriptor is emitted by the environment. Mean, flat, and set
@@ -85,7 +101,11 @@ interface is the permutation-invariant descriptor `xi`.
 
 ## 4. Actor and critic
 
-All three aligned variants use the same two-layer role-specific fusion MLPs:
+All three aligned variants use the same role-specific fusion readout contract.
+The readouts are intentionally optimization-equivalent to the legacy MAPPO
+`MLPBase`: optional input LayerNorm, configured orthogonal/Xavier
+initialization, configured `layer_N` hidden blocks, and per-hidden-layer
+LayerNorm.
 
 ```text
 HAP: f_H([p, representation]) -> velocity distribution
@@ -101,6 +121,22 @@ There is one centralized team critic:
 ```text
 V([p, representation]).
 ```
+
+### Phase-1 gate update, 2026-06-26
+
+The first 350-slot `mean/flat/set` sweep failed because the aligned readout did
+not follow this `MLPBase` contract.  After repairing `FusionMLP`, a seed-1
+350-slot gate recovered normal training:
+
+| architecture | held-out cost/slot | accept | W1 diagnostic |
+|---|---:|---:|---:|
+| mean, fixed readout | 3.2557 | 59.4% | 919.1 m |
+| flat, fixed readout | 2.9574 | 62.6% | 883.9 m |
+
+This means the PPO framework and environment output contract are not the main
+cause of the previous collapse.  Decoder, Sinkhorn reconstruction, and PPG
+auxiliary training should still wait until the fixed Set policy passes the same
+one-seed gate and the formal 3-seed comparison is rerun.
 
 Its scalar value is repeated across the `K+1` buffer rows for compatibility with
 the existing shared runner. The value gradient is stopped at `xi` in phase 1:
@@ -166,3 +202,30 @@ Before training:
 4. Add reconstruction and compare Set-MAPPO against SetRec-MAPPO.
 5. Only after stable three-seed evidence, run long training, cross-K evaluation,
    and final paper experiments.
+
+## 9. Phase-1 gate result (2026-06-26)
+
+The 350-slot, 896k-step, three-seed aligned comparison is complete. All three
+architectures train without numerical failure, but none passes the control
+quality gate:
+
+```text
+architecture  held-out cost/slot  accept   HAP-freeze
+mean          4.6491 +/- 0.1292    38.9%    -0.3% +/- 0.5%
+flat          4.5822 +/- 0.0900    39.7%     approximately 0%
+set           4.6230 +/- 0.0669    39.1%     approximately 0%
+heuristic     2.0694               73.7%     n/a
+```
+
+Set has the lowest cross-seed cost variance, so its implementation is not
+numerically unstable. However, freezing its HAP does not hurt performance and
+freezing learned UAV motion slightly improves representative checkpoints.
+Reconstruction is therefore deferred.
+
+The immediate phase-1 repair is to make the aligned actor and critic readouts
+optimization-equivalent to the proven legacy trunk. In particular,
+`FusionMLP` currently does not honor `use_feature_normalization`,
+`use_orthogonal`, or `layer_N`, and omits the per-layer normalization used by
+`MLPBase`. After this contract is repaired, run a one-seed gate against
+`legacy_mean`, followed by the full three-seed comparison only if useful HAP
+and UAV motion returns.

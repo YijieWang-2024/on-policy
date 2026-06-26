@@ -78,7 +78,7 @@ def _team_obs(seed=0):
         uavs = rng.uniform(0.0, 1.0, size=(K, UAV_STATE_DIM))
         teams[env_id, 0, 0] = 1.0
         teams[env_id, 0, 1:4] = public[:3]
-        teams[env_id, :, 4:11] = public
+        teams[env_id, :, 4:4 + PUBLIC_STATE_DIM] = public
         teams[env_id, 1:, 1:4] = uavs
     return teams
 
@@ -116,9 +116,13 @@ def test_canonical_team_state_layout():
     teams = _team_obs(seed=2)
     state = build_team_state(teams)
     assert state.shape == (N_ENV, CENT_DIM)
-    np.testing.assert_allclose(state[:, :7], teams[:, 0, 4:11])
     np.testing.assert_allclose(
-        state[:, 7:].reshape(N_ENV, K, 3), teams[:, 1:, 1:4]
+        state[:, :PUBLIC_STATE_DIM],
+        teams[:, 0, 4:4 + PUBLIC_STATE_DIM],
+    )
+    np.testing.assert_allclose(
+        state[:, PUBLIC_STATE_DIM:].reshape(N_ENV, K, 3),
+        teams[:, 1:, 1:4],
     )
     repeated = repeat_team_state(teams)
     assert repeated.shape == (N_ENV, N, CENT_DIM)
@@ -200,14 +204,43 @@ def test_all_aligned_architectures_share_actor_and_critic_contracts():
     for architecture, representation_dim in expected_rep_dims.items():
         policy = _policy(architecture)
         assert policy.uses_grouped_batches
-        assert policy.actor.major_fusion.net[0].in_features == (
+        assert policy.actor.major_fusion.input_dim == (
             PUBLIC_STATE_DIM + representation_dim
         )
-        assert policy.actor.minor_fusion.net[0].in_features == (
+        assert policy.actor.minor_fusion.input_dim == (
             UAV_STATE_DIM + PUBLIC_STATE_DIM + representation_dim
         )
-        assert policy.critic.readout.net[0].in_features == (
+        assert policy.critic.readout.input_dim == (
             PUBLIC_STATE_DIM + representation_dim
+        )
+
+
+def test_aligned_readouts_keep_legacy_mlp_contract():
+    args = _args("mean")
+    args.use_feature_normalization = True
+    args.layer_N = 2
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+
+    for readout in (
+        policy.actor.major_fusion,
+        policy.actor.minor_fusion,
+        policy.critic.readout,
+    ):
+        assert hasattr(readout, "feature_norm")
+        assert readout.feature_norm.normalized_shape == (
+            readout.input_dim,
+        )
+        assert readout.mlp._layer_N == 2
+        assert len(readout.mlp.fc2) == 2
+        assert isinstance(readout.mlp.fc1[-1], torch.nn.LayerNorm)
+        assert all(
+            isinstance(block[-1], torch.nn.LayerNorm)
+            for block in readout.mlp.fc2
         )
 
 
