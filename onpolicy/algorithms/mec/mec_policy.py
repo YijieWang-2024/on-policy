@@ -20,8 +20,12 @@ from onpolicy.algorithms.utils.mlp import MLPBase
 from onpolicy.algorithms.utils.rnn import RNNLayer
 from onpolicy.algorithms.utils.util import check, init
 from onpolicy.algorithms.mec.set_networks import (
+    PopulationReconstructionDecoder,
     FusionMLP,
-    PopulationEncoder,
+    build_population_encoder,
+    chamfer_set_loss,
+    population_encoder_type,
+    population_representation_dim,
 )
 from onpolicy.envs.mec.observation import (
     AGENT_OBS_DIM,
@@ -670,37 +674,196 @@ class MECSetActor(_PopulationActor):
             raise ValueError(
                 "mec_set_dim must be divisible by mec_set_heads"
             )
+        representation_dim = population_representation_dim(args)
+        self.set_actor_context = str(
+            getattr(args, "mec_set_actor_context", "pooled")
+        ).lower()
+        if self.set_actor_context not in {"pooled", "relational"}:
+            raise ValueError(
+                "mec_set_actor_context must be one of: "
+                "pooled, relational"
+            )
+        if (
+            population_encoder_type(args) == "flat_mlp"
+            and self.set_actor_context == "relational"
+        ):
+            raise ValueError(
+                "mec_set_encoder_type=flat_mlp supports only "
+                "mec_set_actor_context=pooled"
+            )
+        self.set_actor_encoder_mode = str(
+            getattr(args, "mec_set_actor_encoder", "shared")
+        ).lower()
+        if self.set_actor_encoder_mode not in {"shared", "separate"}:
+            raise ValueError(
+                "mec_set_actor_encoder must be one of: shared, separate"
+            )
         super().__init__(
             args,
             obs_space,
             action_space,
             num_agents,
-            model_dim * num_seeds,
+            representation_dim,
             device,
         )
-        self.population_encoder = PopulationEncoder(
-            atom_dim=UAV_STATE_DIM,
-            model_dim=model_dim,
-            num_heads=num_heads,
-            num_seeds=num_seeds,
-            element_blocks=int(
-                getattr(args, "mec_set_element_blocks", 2)
-            ),
-            latent_blocks=int(
-                getattr(args, "mec_set_latent_blocks", 1)
-            ),
-            use_relu=bool(args.use_ReLU),
+        if self.set_actor_encoder_mode == "shared":
+            self.population_encoder = build_population_encoder(
+                args,
+                atom_dim=UAV_STATE_DIM,
+                use_relu=bool(args.use_ReLU),
+                num_atoms=self.num_uavs,
+            )
+        else:
+            self.major_population_encoder = build_population_encoder(
+                args,
+                atom_dim=UAV_STATE_DIM,
+                use_relu=bool(args.use_ReLU),
+                num_atoms=self.num_uavs,
+            )
+            self.minor_population_encoder = build_population_encoder(
+                args,
+                atom_dim=UAV_STATE_DIM,
+                use_relu=bool(args.use_ReLU),
+                num_atoms=self.num_uavs,
+            )
+        self.use_reconstruction_aux = bool(
+            getattr(args, "mec_set_reconstruction_coef", 0.0) > 0.0
         )
+        if (
+            self.use_reconstruction_aux
+            and self.set_actor_encoder_mode != "shared"
+        ):
+            raise ValueError(
+                "mec_set_reconstruction_coef currently requires "
+                "mec_set_actor_encoder=shared"
+            )
+        if self.use_reconstruction_aux:
+            self.reconstruction_decoder = PopulationReconstructionDecoder(
+                representation_dim=representation_dim,
+                num_atoms=self.num_uavs,
+                atom_dim=UAV_STATE_DIM,
+                hidden_dim=self.hidden_size,
+                use_relu=bool(args.use_ReLU),
+                layer_N=args.layer_N,
+                use_orthogonal=args.use_orthogonal,
+            )
+        if self.set_actor_context == "relational":
+            self.minor_fusion = FusionMLP(
+                UAV_STATE_DIM
+                + PUBLIC_STATE_DIM
+                + representation_dim
+                + model_dim,
+                self.hidden_size,
+                bool(args.use_ReLU),
+                layer_N=args.layer_N,
+                use_orthogonal=args.use_orthogonal,
+                use_feature_normalization=args.use_feature_normalization,
+            )
         self.to(device)
+
+    def population_representation(self, obs):
+        obs = check(obs).to(**self.tpdv)
+        team = self._reshape_team(obs)
+        uavs = team[:, 1:, _OWN]
+        if self.set_actor_encoder_mode == "shared":
+            descriptor = self.population_encoder(uavs)
+        else:
+            descriptor = self.major_population_encoder(uavs)
+        return descriptor.reshape(descriptor.shape[0], -1)
 
     def population_descriptor(self, obs):
         obs = check(obs).to(**self.tpdv)
         team = self._reshape_team(obs)
-        return self.population_encoder(team[:, 1:, _OWN])
+        if self.set_actor_encoder_mode == "shared":
+            return self.population_encoder(team[:, 1:, _OWN])
+        return self.major_population_encoder(team[:, 1:, _OWN])
+
+    def reconstruct_population(self, uavs):
+        if not self.use_reconstruction_aux:
+            raise RuntimeError("Set reconstruction auxiliary is disabled")
+        descriptor = self.population_encoder(uavs)
+        representation = descriptor.reshape(descriptor.shape[0], -1)
+        return self.reconstruction_decoder(representation)
+
+    def reconstruction_chamfer_loss(self, uavs):
+        return chamfer_set_loss(self.reconstruct_population(uavs), uavs)
 
     def _representation(self, uavs):
+        if self.set_actor_encoder_mode != "shared":
+            raise RuntimeError(
+                "separate Set actor encoders use role-specific features"
+            )
         descriptor = self.population_encoder(uavs)
         return descriptor.reshape(descriptor.shape[0], -1)
+
+    def _features(self, obs):
+        if self.set_actor_encoder_mode == "separate":
+            return self._features_separate_encoders(obs)
+        if self.set_actor_context != "relational":
+            return super()._features(obs)
+
+        team = self._reshape_team(obs)
+        public = team[:, 0, _PUBLIC]
+        uavs = team[:, 1:, _OWN]
+        descriptor, tokens = self.population_encoder.forward_with_tokens(
+            uavs
+        )
+        representation = descriptor.reshape(descriptor.shape[0], -1)
+        major = self.major_fusion(
+            torch.cat([public, representation], dim=-1)
+        )
+        public_uav = public.unsqueeze(1).expand(
+            -1, self.num_uavs, -1
+        )
+        representation_uav = representation.unsqueeze(1).expand(
+            -1, self.num_uavs, -1
+        )
+        minor = self.minor_fusion(
+            torch.cat(
+                [uavs, public_uav, representation_uav, tokens],
+                dim=-1,
+            )
+        )
+        return torch.cat(
+            [major.unsqueeze(1), minor], dim=1
+        ).reshape(-1, self.hidden_size)
+
+    def _features_separate_encoders(self, obs):
+        team = self._reshape_team(obs)
+        public = team[:, 0, _PUBLIC]
+        uavs = team[:, 1:, _OWN]
+
+        major_descriptor = self.major_population_encoder(uavs)
+        major_representation = major_descriptor.reshape(
+            major_descriptor.shape[0], -1
+        )
+        major = self.major_fusion(
+            torch.cat([public, major_representation], dim=-1)
+        )
+
+        if self.set_actor_context == "relational":
+            minor_descriptor, tokens = (
+                self.minor_population_encoder.forward_with_tokens(uavs)
+            )
+        else:
+            minor_descriptor = self.minor_population_encoder(uavs)
+            tokens = None
+        minor_representation = minor_descriptor.reshape(
+            minor_descriptor.shape[0], -1
+        )
+        public_uav = public.unsqueeze(1).expand(
+            -1, self.num_uavs, -1
+        )
+        representation_uav = minor_representation.unsqueeze(1).expand(
+            -1, self.num_uavs, -1
+        )
+        minor_inputs = [uavs, public_uav, representation_uav]
+        if tokens is not None:
+            minor_inputs.append(tokens)
+        minor = self.minor_fusion(torch.cat(minor_inputs, dim=-1))
+        return torch.cat(
+            [major.unsqueeze(1), minor], dim=1
+        ).reshape(-1, self.hidden_size)
 
 
 class MECTeamCritic(nn.Module):
@@ -734,17 +897,38 @@ class MECTeamCritic(nn.Module):
 
         use_relu = bool(args.use_ReLU)
         if architecture == "set":
-            if population_encoder is None:
-                raise ValueError(
-                    "set critic requires the public population encoder"
+            self.set_critic_encoder_mode = str(
+                getattr(args, "mec_set_critic_encoder", "actor_detached")
+            ).lower()
+            representation_dim = population_representation_dim(args)
+            if self.set_critic_encoder_mode == "actor_detached":
+                if population_encoder is None:
+                    raise ValueError(
+                        "actor_detached set critic requires the public "
+                        "population encoder"
+                    )
+                self.__dict__["_population_encoder_ref"] = weakref.ref(
+                    population_encoder
                 )
-            self.__dict__["_population_encoder_ref"] = weakref.ref(
-                population_encoder
-            )
-            representation_dim = (
-                int(getattr(args, "mec_set_dim", 64))
-                * int(getattr(args, "mec_set_num_seeds", 4))
-            )
+            elif self.set_critic_encoder_mode == "shared_grad":
+                if population_encoder is None:
+                    raise ValueError(
+                        "shared_grad set critic requires the public "
+                        "population encoder"
+                    )
+                self.population_encoder = population_encoder
+            elif self.set_critic_encoder_mode == "separate":
+                self.population_encoder = build_population_encoder(
+                    args,
+                    atom_dim=UAV_STATE_DIM,
+                    use_relu=use_relu,
+                    num_atoms=self.num_uavs,
+                )
+            else:
+                raise ValueError(
+                    "mec_set_critic_encoder must be one of: "
+                    "actor_detached, separate, shared_grad"
+                )
         elif architecture == "flat":
             representation_dim = UAV_STATE_DIM * self.num_uavs
         elif architecture == "mean":
@@ -808,13 +992,16 @@ class MECTeamCritic(nn.Module):
         public, uavs = self._team_from_central_obs(cent_obs)
 
         if self.architecture == "set":
-            encoder = self._population_encoder_ref()
-            if encoder is None:
-                raise RuntimeError(
-                    "public population encoder is no longer available"
-                )
-            with torch.no_grad():
-                descriptor = encoder(uavs)
+            if self.set_critic_encoder_mode == "actor_detached":
+                encoder = self._population_encoder_ref()
+                if encoder is None:
+                    raise RuntimeError(
+                        "public population encoder is no longer available"
+                    )
+                with torch.no_grad():
+                    descriptor = encoder(uavs)
+            else:
+                descriptor = self.population_encoder(uavs)
             representation = descriptor.reshape(
                 descriptor.shape[0], -1
             )
@@ -877,8 +1064,25 @@ class MECPolicy(R_MAPPOPolicy):
             getattr(args, "mec_policy_arch", "mean")
         ).lower()
         self.uses_grouped_batches = True
+        set_critic_encoder_mode = str(
+            getattr(args, "mec_set_critic_encoder", "actor_detached")
+        ).lower()
+        set_actor_encoder_mode = str(
+            getattr(args, "mec_set_actor_encoder", "shared")
+        ).lower()
+        if (
+            self.architecture == "set"
+            and set_actor_encoder_mode == "separate"
+            and set_critic_encoder_mode != "separate"
+        ):
+            raise ValueError(
+                "mec_set_actor_encoder=separate requires "
+                "mec_set_critic_encoder=separate so the critic does not "
+                "implicitly choose one actor encoder"
+            )
         self.recompute_values_after_actor_update = (
             self.architecture == "set"
+            and set_critic_encoder_mode in {"actor_detached", "shared_grad"}
         )
 
         expected_obs_dim = AGENT_OBS_DIM
@@ -944,12 +1148,17 @@ class MECPolicy(R_MAPPOPolicy):
                 self.num_agents,
                 device,
             )
+            population_encoder = (
+                self.actor.population_encoder
+                if set_actor_encoder_mode == "shared"
+                else None
+            )
             self.critic = MECTeamCritic(
                 args,
                 cent_obs_space,
                 self.num_agents,
                 "set",
-                population_encoder=self.actor.population_encoder,
+                population_encoder=population_encoder,
                 device=device,
             )
         else:
@@ -962,3 +1171,74 @@ class MECPolicy(R_MAPPOPolicy):
             self.actor.parameters(), lr=self.lr, eps=self.opti_eps, weight_decay=self.weight_decay)
         self.critic_optimizer = torch.optim.Adam(
             self.critic.parameters(), lr=self.critic_lr, eps=self.opti_eps, weight_decay=self.weight_decay)
+
+    def load_set_pretrained_actor(self, actor_state_dict):
+        """Load only Set representation weights from a pretrained actor."""
+        if self.architecture != "set":
+            raise ValueError("Set pretraining weights require set policy")
+        if getattr(self.actor, "set_actor_encoder_mode", "shared") != "shared":
+            raise ValueError(
+                "Set pretraining weights currently require "
+                "mec_set_actor_encoder=shared"
+            )
+        actor_state = self.actor.state_dict()
+        allowed_prefixes = (
+            "population_encoder.",
+            "reconstruction_decoder.",
+        )
+        filtered = {
+            key: value
+            for key, value in actor_state_dict.items()
+            if key.startswith(allowed_prefixes)
+            and key in actor_state
+            and actor_state[key].shape == value.shape
+        }
+        encoder_keys = [
+            key for key in filtered if key.startswith("population_encoder.")
+        ]
+        if not encoder_keys:
+            raise ValueError(
+                "pretrained actor does not contain compatible "
+                "population_encoder weights"
+            )
+        actor_state.update(filtered)
+        self.actor.load_state_dict(actor_state)
+        return sorted(filtered)
+
+    def set_set_encoder_trainable(self, trainable: bool):
+        if self.architecture != "set":
+            return 0
+        if getattr(self.actor, "set_actor_encoder_mode", "shared") != "shared":
+            return 0
+        count = 0
+        for parameter in self.actor.population_encoder.parameters():
+            parameter.requires_grad_(bool(trainable))
+            count += 1
+        return count
+
+    def mec_set_reconstruction_loss(self, cent_obs):
+        if self.architecture != "set" or not getattr(
+            self.actor, "use_reconstruction_aux", False
+        ):
+            raise RuntimeError("MEC Set reconstruction auxiliary is disabled")
+        cent_obs = check(cent_obs).to(
+            dtype=torch.float32, device=self.device
+        )
+        if cent_obs.shape[-1] != team_state_dim(self.num_agents):
+            raise ValueError(
+                "reconstruction auxiliary expects canonical centralized "
+                f"state dim {team_state_dim(self.num_agents)}, "
+                f"got {cent_obs.shape[-1]}"
+            )
+        if cent_obs.shape[0] % self.num_agents != 0:
+            raise ValueError(
+                "reconstruction auxiliary requires complete K+1 groups"
+            )
+        grouped = cent_obs.reshape(
+            -1, self.num_agents, cent_obs.shape[-1]
+        )
+        team_state = grouped[:, 0]
+        uavs = team_state[:, PUBLIC_STATE_DIM:].reshape(
+            -1, self.num_agents - 1, UAV_STATE_DIM
+        )
+        return self.actor.reconstruction_chamfer_loss(uavs)

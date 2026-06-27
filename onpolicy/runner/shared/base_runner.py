@@ -114,6 +114,21 @@ class Runner(object):
         else:
             self.policy = Policy(self.all_args, self.envs.observation_space[0], share_observation_space, self.envs.action_space[0], device = self.device)
 
+        pretrained_actor = getattr(
+            self.all_args, "mec_set_pretrained_actor", None
+        )
+        if self.env_name == "MEC" and pretrained_actor:
+            actor_state = torch.load(
+                str(pretrained_actor), map_location=self.device
+            )
+            loaded_keys = self.policy.load_set_pretrained_actor(
+                actor_state
+            )
+            print(
+                "loaded MEC Set pretrained representation "
+                f"from {pretrained_actor} ({len(loaded_keys)} tensors)"
+            )
+
         # algorithm
         if self.algorithm_name == "mat" or self.algorithm_name == "mat_dec":
             self.trainer = TrainAlgo(self.all_args, self.policy, self.num_agents, device = self.device)
@@ -288,7 +303,7 @@ class Runner(object):
             if self.use_wandb:
                 wandb.log({k: v}, step=total_num_steps)
             else:
-                self.writter.add_scalars(k, {k: v}, total_num_steps)
+                self.writter.add_scalar(k, v, total_num_steps)
 
     def log_env(self, env_infos, total_num_steps):
         """
@@ -301,4 +316,4 @@ class Runner(object):
                 if self.use_wandb:
                     wandb.log({k: np.mean(v)}, step=total_num_steps)
                 else:
-                    self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)
+                    self.writter.add_scalar(k, np.mean(v), total_num_steps)

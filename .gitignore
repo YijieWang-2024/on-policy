@@ -17,5 +17,7 @@ wandb
 api
 logs
 training_logs/
+eval_outputs/
+pretrain_outputs/
 .nfs*
 *.so

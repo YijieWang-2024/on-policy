@@ -263,6 +263,18 @@ def get_config():
         help="token/latent width of the MEC population encoder",
     )
     parser.add_argument(
+        "--mec_set_encoder_type",
+        type=str,
+        default="latent_slots",
+        choices=["latent_slots", "mean_pool", "flat_mlp"],
+        help=(
+            "Set population encoder: latent_slots uses the default "
+            "learned seed pooling, while mean_pool uses self-attention "
+            "tokens followed by invariant mean pooling, and flat_mlp "
+            "uses an ordered flattened UAV state MLP diagnostic"
+        ),
+    )
+    parser.add_argument(
         "--mec_set_heads",
         type=int,
         default=4,
@@ -285,6 +297,75 @@ def get_config():
         type=int,
         default=1,
         help="self-attention blocks among pooled population slots",
+    )
+    parser.add_argument(
+        "--mec_set_critic_encoder",
+        type=str,
+        default="actor_detached",
+        choices=["actor_detached", "separate", "shared_grad"],
+        help=(
+            "Set critic population encoder mode: actor_detached reuses "
+            "the actor encoder under no_grad, while separate trains an "
+            "independent critic encoder with the value loss, and "
+            "shared_grad lets the critic value loss update the shared "
+            "actor encoder as a diagnostic"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_actor_encoder",
+        type=str,
+        default="shared",
+        choices=["shared", "separate"],
+        help=(
+            "Set actor population encoder ownership: shared uses one "
+            "encoder for HAP and UAV actor branches, while separate uses "
+            "independent HAP/UAV actor encoders as a diagnostic for "
+            "role-gradient interference"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_actor_context",
+        type=str,
+        default="pooled",
+        choices=["pooled", "relational"],
+        help=(
+            "Set actor UAV context: pooled uses only the invariant "
+            "population descriptor, while relational also gives each UAV "
+            "its equivariant self-attention token"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_reconstruction_coef",
+        type=float,
+        default=0.0,
+        help=(
+            "Auxiliary coefficient for Set population reconstruction. "
+            "When positive, the actor optimizer adds a Chamfer-style "
+            "unordered UAV atom reconstruction loss to shape the actor "
+            "population encoder."
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_pretrained_actor",
+        type=str,
+        default=None,
+        help=(
+            "Path to an actor.pt produced by MEC Set reconstruction "
+            "pretraining. Only population_encoder and, when present, "
+            "reconstruction_decoder weights are loaded; critic, readouts, "
+            "optimizers, and ValueNorm are not restored."
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_freeze_pretrained_encoder_updates",
+        type=int,
+        default=0,
+        help=(
+            "For Set policies, freeze the actor population encoder for "
+            "this many PPO updates after loading/initialization. This "
+            "supports a staged pretrain -> readout warm-up -> finetune "
+            "training schedule."
+        ),
     )
     parser.add_argument("--target_kl", type=float, default=None,
                         help="optional approximate-KL threshold for early stopping PPO epochs")

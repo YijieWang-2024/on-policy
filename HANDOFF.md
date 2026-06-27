@@ -301,3 +301,283 @@ validation/test split passed regression tests. Full verification:
 Next step: run the fixed Set seed-1 350-slot gate before adding decoder,
 Sinkhorn reconstruction, or PPG. If Set also recovers, rerun the formal
 3-seed Mean/Flat/Set comparison with the repaired readout.
+
+## 11. 2026-06-26: exploration scale gate
+
+The slow-trajectory concern was tested directly.  A speed-scale diagnostic
+showed that doubling learned UAV velocities improves repaired Flat cost by
+about 5%, but scaling by 4x or 8x hurts due to overshoot and safety violations.
+So the right intervention is moderate exploration, not hard-coded full-speed
+flight.
+
+Flat with `mec_logstd_init=-1.2` (`sigma ~= 0.30`) was trained for only 448k
+steps and already reached held-out cost/slot `2.6442`, acceptance `68.8%`, and
+W1 `785.9 m`.  This beats the previous repaired Flat 896k result
+(`2.9574`) and is slightly better than the legacy_mean cost reference
+(`2.7470`).
+
+The same high-variance 448k gate did not rescue Set: best validation stayed near
+`-1531`.  Set now looks like a representation/critic-training issue.  The
+current Set critic consumes the actor population encoder under `torch.no_grad()`,
+so critic value loss cannot shape the Set encoder.
+
+Next step: keep `mec_logstd_init=-1.2` for Mean/Flat gates, and ablate Set
+encoder ownership/training before adding reconstruction/Sinkhorn/PPG.
+
+## 12. 2026-06-26: Set diagnosis after structure ablations
+
+Set was checked for the obvious architecture issues before moving to
+reconstruction. The aligned readouts still use the repaired MAPPO-friendly
+`FusionMLP`; the Set-specific attention encoder is larger than Mean/Flat, but
+shrinking it did not fix learning.
+
+New diagnostic switches:
+
+- `--mec_set_critic_encoder {actor_detached,separate}`: keeps the old
+  detached actor-encoder critic by default, or trains an independent critic
+  population encoder with the value loss.
+- `--mec_set_actor_context {pooled,relational}`: keeps the old pooled-only UAV
+  readout by default, or also gives each UAV its equivariant self-attention
+  token.
+
+112k-step, 350-slot, seed-1, `mec_logstd_init=-1.2` Set diagnostics:
+
+| variant | best validation |
+|---|---:|
+| high-variance Set baseline | -1531.43 |
+| separate critic encoder | -1531.60 |
+| small Set encoder | -1531.20 |
+| relational UAV context | -1534.83 |
+
+For comparison, high-variance Flat reached `-1414.47` at 112k and `-874.83` at
+448k. The Set failure therefore is not explained by one missing readout trick,
+critic encoder detachment, too many layers, or the pooled-only minor input
+alone. Current conclusion: pure PPO is not shaping the Set attention encoder
+into a useful control representation. Do not spend large compute on pure
+Set-MAPPO now; move to the decoder/reconstruction/auxiliary representation
+phase and keep Flat high-variance as the working control baseline.
+
+## 13. 2026-06-27: simple encoder / optimizer-path ablation
+
+The Mean/Flat/Set parameter-sharing concern was checked explicitly. The user's
+interpretation is correct:
+
+- Mean/Flat have no learnable shared trunk between HAP actor, UAV actor, and
+  critic. Their shared population descriptor is non-parametric.
+- Set shares a learnable actor `population_encoder` between HAP and UAV actor
+  branches. The default critic reuses that encoder in forward under
+  `torch.no_grad()`, so value loss does not update it.
+
+New switches:
+
+- `--mec_set_encoder_type {latent_slots,mean_pool}`. `mean_pool` is a simple
+  diagnostic encoder: atom MLP, multi-head self-attention, invariant mean pool.
+- `--mec_set_critic_encoder shared_grad`. This registers the actor encoder in
+  the critic too, so both actor and critic optimizers update the same encoder.
+  It is diagnostic only; it is less clean than a PPG-style auxiliary phase.
+
+112k-step, 350-slot, seed-1, `mec_logstd_init=-1.2` mean-pool diagnostics:
+
+| critic path | best validation |
+|---|---:|
+| actor_detached | -1540.76 |
+| separate critic encoder | -1539.08 |
+| shared_grad | -1546.69 |
+
+So the simple encoder did not train stably either, and directly letting value
+loss update the shared actor encoder did not help. The Set issue is broader
+than latent-slot complexity or critic `no_grad`. Current recommendation:
+do not continue pure Set-MAPPO sweeps. Proceed to auxiliary representation
+learning, starting with a cheap reconstruction/decoder phase, then add
+Sinkhorn/PPG once the auxiliary signal is validated.
+
+## 14. 2026-06-27: full 896k confirmation gate
+
+The quick-gate conclusion was rechecked with a full training budget after
+auditing the `mean_pool` code. The audit found that mean-pool's invariance,
+equivariance, dimensions, and critic paths were correct, but the population
+encoder had not fully inherited the MAPPO-friendly numerical contract. This
+was repaired:
+
+- atom encoder now uses optional feature LayerNorm and `MLPLayer`;
+- `layer_N`, `use_orthogonal`, and `use_ReLU` are honored;
+- attention / FFN blocks are initialized according to `use_orthogonal`;
+- regression tests lock the encoder contract.
+
+Full protocol: 350 slots, seed 1, `mec_logstd_init=-1.2`, 896k environment
+steps / 160 PPO updates, validation seed 1000, held-out seed 100000 with stride
+13 over 24 episodes.
+
+Validation best:
+
+| architecture | best validation | selected step |
+|---|---:|---:|
+| Mean | -766.40 | 784k |
+| Flat | -815.46 | 896k |
+| Set mean_pool actor_detached | -1478.39 | 224k |
+| Set mean_pool separate critic | -1525.51 | 672k |
+| Set mean_pool shared_grad | -1511.63 | 672k |
+
+Held-out evaluation:
+
+| architecture | cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|
+| Mean | 2.2695 | 73.5% | 702.2 m | +28.2% |
+| Flat | 2.3591 | 73.0% | 729.4 m | +5.0% |
+| Set mean_pool actor_detached | 4.4842 | 41.1% | 1220.4 m | -0.1% |
+| Set mean_pool separate critic | 4.5496 | 40.3% | 1248.6 m | -0.1% |
+| Set mean_pool shared_grad | 4.3408 | 43.2% | 1209.3 m | -0.1% |
+
+Conclusion: the "Set is merely slower because it has more parameters" concern
+has now been tested with a full 896k budget. Mean/Flat recover strong
+load-bearing behavior; all three simple Set encoder paths remain far behind.
+Proceed to auxiliary representation learning rather than more pure Set-MAPPO
+sweeps.
+
+## 15. 2026-06-27: HAP/UAV actor encoder sharing check
+
+The remaining framework-level concern was whether Set fails because the HAP
+actor and UAV actor share one learnable population encoder. A diagnostic switch
+was added:
+
+```text
+--mec_set_actor_encoder {shared,separate}
+```
+
+`separate` gives the HAP actor and UAV actor independent population encoders
+and requires `--mec_set_critic_encoder separate`, so the critic also owns its
+own encoder. Tests verify disjoint optimizer ownership and role-specific
+gradient routing.
+
+112k gate:
+
+| variant | best validation | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|
+| Set mean_pool, separate HAP/UAV actor encoders, separate critic encoder | -1567.28 | 4.5959 | 39.5% | 1287.3 m | -0.0% |
+
+This did not show an early recovery signal and should not be expanded to 896k
+for now. The evidence now points away from simple HAP/UAV encoder-sharing
+interference as the main cause. Continue with auxiliary representation learning
+instead of more pure Set-MAPPO sweeps.
+
+## 16. 2026-06-27: flat-MLP population encoder check
+
+To test whether the failure was specific to self-attention / mean-pooling, a
+plain ordered fixed-K MLP population encoder was added:
+
+```text
+--mec_set_encoder_type flat_mlp
+```
+
+It flattens the UAV atoms and maps them through a MAPPO-style `MLPLayer` into a
+fixed-width descriptor. It is intentionally order-sensitive and supports only
+pooled actor context.
+
+The first gate used the no-sharing setting:
+
+```text
+--mec_set_encoder_type flat_mlp
+--mec_set_actor_encoder separate
+--mec_set_critic_encoder separate
+```
+
+400k gate:
+
+| variant | best validation | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|
+| Set flat_mlp, separate HAP/UAV actor encoders, separate critic encoder | -1470.92 | 4.1688 | 45.6% | 1166.1 m | -0.8% |
+
+This is slightly better than mean-pool Set but still far behind Mean/Flat and
+does not learn a load-bearing HAP trajectory. The failure is therefore unlikely
+to be just a self-attention or mean-pool implementation bug. The suspect is now
+the learnable two-stage population descriptor/readout interface under pure
+MAPPO, so the next main step remains auxiliary representation learning.
+
+## 17. 2026-06-27: Chamfer reconstruction auxiliary MVP
+
+The user's symmetry concern is correct: `mean_pool + reconstruction` should
+remain insensitive to UAV row order, so a row-wise MSE reconstruction loss is
+not appropriate. A first auxiliary MVP was added:
+
+```text
+--mec_set_reconstruction_coef 0.1
+```
+
+It attaches a `PopulationReconstructionDecoder` to the shared Set actor
+encoder and uses symmetric squared Chamfer set loss over normalized UAV atoms.
+Tests verify target-order invariance, input-permutation invariance for
+mean-pool, and that gradients reach the actor population encoder and decoder.
+
+The first 400k gate used:
+
+```text
+--mec_policy_arch set
+--mec_set_encoder_type mean_pool
+--mec_set_reconstruction_coef 0.1
+```
+
+Results:
+
+| variant | best validation | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|
+| Set mean_pool + joint Chamfer auxiliary | -1511.02 | 4.6367 | 39.0% | 1250.8 m | -0.0% |
+
+The reconstruction loss itself decreased from `0.2840` at 5.6k steps to
+`0.0103` at 397.6k steps, so the auxiliary task is learnable. However, control
+did not improve. Do not scale this naive joint-loss path.
+
+Revised plan: use staged SetRec training. Collect replay states for
+representation learning, pretrain `encoder + decoder` with Chamfer/Sinkhorn,
+then initialize PPO from that encoder. If auxiliary updates continue during RL,
+use a PPG-style phase with policy KL protection instead of mixing an
+unconstrained auxiliary loss into every PPO actor update.
+
+## 18. 2026-06-27: staged reconstruction pretraining result
+
+The staged pipeline is implemented:
+
+- `python -m onpolicy.scripts.train.pretrain_mec_set_reconstruction` collects
+  replay UAV atoms and trains `population_encoder + reconstruction_decoder`.
+- `--mec_set_pretrained_actor <actor.pt>` loads only compatible Set
+  `population_encoder.*` and `reconstruction_decoder.*` tensors into PPO.
+- `--mec_set_freeze_pretrained_encoder_updates N` freezes the actor population
+  encoder for the first `N` PPO updates.
+- TensorBoard logging now uses `add_scalar`, fixing Windows failures for tags
+  containing `/`, such as `mec/uav_compute_utilization`.
+
+Mean-pool staged pretraining:
+
+| stage | result |
+|---|---:|
+| mixed replay samples | 22,400 |
+| Chamfer pretrain loss | 0.0383 -> 0.0020 |
+| PPO freeze-12 best validation | -1620.48 |
+| PPO freeze-12 held-out cost/slot | 4.7404 |
+| PPO freeze-12 HAP-freeze | -0.3% |
+| PPO no-freeze 112k best validation | -1566.83 |
+
+Latent-slot staged pretraining:
+
+| stage | result |
+|---|---:|
+| mixed replay samples | 22,400 |
+| Chamfer pretrain loss | 0.0441 -> 0.0017 |
+| PPO no-freeze 112k best validation | -1537.72 |
+| PPO no-freeze held-out cost/slot | 4.6197 |
+| PPO no-freeze HAP-freeze | -0.2% |
+
+Conclusion: pure geometry reconstruction is learnable but does not produce a
+control-useful Set representation. Do not continue pure Chamfer pretraining
+sweeps.
+
+Current archive decision: pause further algorithm branches. Recent work has
+not produced a substantive algorithmic improvement, and the descriptor failure
+is still not explained. In particular, do not move next to Mean/Flat policy
+distillation, heuristic behavior cloning, or more auxiliary-control hybrids;
+those would change the problem rather than explain why the descriptor path
+breaks PPO learning.
+
+The next useful phase should be analysis of the descriptor/readout interface:
+gradient scales, feature statistics, action sensitivity to individual UAV
+atoms, and optimizer/loss coupling across Mean, Flat, mean_pool, flat_mlp, and
+latent_slots.

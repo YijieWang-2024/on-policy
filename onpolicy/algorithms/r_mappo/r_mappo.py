@@ -47,6 +47,14 @@ class R_MAPPO():
         self._use_grouped_policy_batches = bool(
             getattr(policy, "uses_grouped_batches", False)
         )
+        self.mec_set_reconstruction_coef = float(
+            getattr(args, "mec_set_reconstruction_coef", 0.0)
+        )
+        self._use_mec_set_reconstruction = bool(
+            self.mec_set_reconstruction_coef > 0.0
+            and getattr(args, "env_name", None) == "MEC"
+            and getattr(args, "mec_policy_arch", None) == "set"
+        )
         
         assert (self._use_popart and self._use_valuenorm) == False, ("self._use_popart and self._use_valuenorm can not be set True simultaneously")
         
@@ -201,11 +209,22 @@ class R_MAPPO():
         )
 
         policy_loss = policy_action_loss
+        reconstruction_loss = None
+        if self._use_mec_set_reconstruction:
+            reconstruction_loss = self.policy.mec_set_reconstruction_loss(
+                share_obs_batch
+            )
 
         self.policy.actor_optimizer.zero_grad()
 
         if update_actor:
-            (policy_loss - dist_entropy * self.entropy_coef).backward()
+            actor_loss = policy_loss - dist_entropy * self.entropy_coef
+            if reconstruction_loss is not None:
+                actor_loss = actor_loss + (
+                    self.mec_set_reconstruction_coef
+                    * reconstruction_loss
+                )
+            actor_loss.backward()
 
         if self._use_max_grad_norm:
             actor_grad_norm = nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
@@ -246,6 +265,7 @@ class R_MAPPO():
             actor_grad_norm,
             imp_weights,
             role_losses,
+            reconstruction_loss,
         )
 
     def train(self, buffer, update_actor=True):
@@ -278,6 +298,8 @@ class R_MAPPO():
         train_info['ratio'] = 0
         train_info['approx_kl'] = 0
         train_info['clip_fraction'] = 0
+        if self._use_mec_set_reconstruction:
+            train_info["mec_set_reconstruction_loss"] = 0
         if self._use_mec_rolewise_loss:
             train_info["major_policy_loss"] = 0
             train_info["minor_policy_loss"] = 0
@@ -301,7 +323,7 @@ class R_MAPPO():
 
             for sample in data_generator:
 
-                value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights, role_losses \
+                value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights, role_losses, reconstruction_loss \
                     = self.ppo_update(sample, update_actor)
 
                 train_info['value_loss'] += value_loss.item()
@@ -324,6 +346,10 @@ class R_MAPPO():
                 )
                 for key, value in role_losses.items():
                     train_info[key] += value
+                if reconstruction_loss is not None:
+                    train_info[
+                        "mec_set_reconstruction_loss"
+                    ] += reconstruction_loss.item()
                 epoch_approx_kl += approx_kl
                 epoch_updates += 1
                 num_updates += 1
