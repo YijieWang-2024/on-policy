@@ -22,6 +22,7 @@ from onpolicy.algorithms.utils.util import check, init
 from onpolicy.algorithms.mec.set_networks import (
     PopulationReconstructionDecoder,
     FusionMLP,
+    ResidualAttentionBlock,
     build_population_encoder,
     chamfer_set_loss,
     population_encoder_type,
@@ -45,6 +46,26 @@ _EPS = 1e-6
 _ROLE = ROLE_INDEX
 _OWN = OWN_SLICE
 _PUBLIC = PUBLIC_SLICE
+
+
+def _lexsort_uavs(uavs: torch.Tensor) -> torch.Tensor:
+    """Return UAV atoms sorted by x, then y, then queue.
+
+    This is a non-learned permutation-invariant population descriptor used as
+    a diagnostic: it preserves the full fixed-K atom set while removing the
+    arbitrary row order from the actor/critic interface.
+    """
+    sorted_uavs = uavs
+    for dim in reversed(range(UAV_STATE_DIM)):
+        indices = torch.argsort(
+            sorted_uavs[..., dim], dim=1, stable=True
+        )
+        sorted_uavs = torch.gather(
+            sorted_uavs,
+            1,
+            indices.unsqueeze(-1).expand(-1, -1, UAV_STATE_DIM),
+        )
+    return sorted_uavs
 
 
 class MECActor(nn.Module):
@@ -617,6 +638,74 @@ class _PopulationActor(_GroupedRoleActor):
         ).reshape(-1, self.hidden_size)
 
 
+class _UAVCrossAttentionReadout(nn.Module):
+    """Equivariant UAV decoder that reads the encoded population tokens."""
+
+    def __init__(
+        self,
+        args,
+        *,
+        representation_dim: int,
+        model_dim: int,
+        num_heads: int,
+        hidden_size: int,
+    ):
+        super().__init__()
+        use_relu = bool(args.use_ReLU)
+        self.query = FusionMLP(
+            UAV_STATE_DIM + PUBLIC_STATE_DIM + model_dim,
+            model_dim,
+            use_relu,
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
+        )
+        self.attention = ResidualAttentionBlock(
+            model_dim,
+            num_heads,
+            use_relu,
+            bool(args.use_orthogonal),
+        )
+        self.fusion = FusionMLP(
+            UAV_STATE_DIM
+            + PUBLIC_STATE_DIM
+            + int(representation_dim)
+            + model_dim
+            + model_dim,
+            hidden_size,
+            use_relu,
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
+        )
+
+    def forward(
+        self,
+        uavs: torch.Tensor,
+        public: torch.Tensor,
+        representation: torch.Tensor,
+        tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        public_uav = public.unsqueeze(1).expand(-1, uavs.shape[1], -1)
+        representation_uav = representation.unsqueeze(1).expand(
+            -1, uavs.shape[1], -1
+        )
+        query = self.query(torch.cat([uavs, public_uav, tokens], dim=-1))
+        context = self.attention(query, tokens)
+        return self.fusion(
+            torch.cat(
+                [
+                    uavs,
+                    public_uav,
+                    representation_uav,
+                    tokens,
+                    context,
+                ],
+                dim=-1,
+            )
+        )
+
+
 class MECMeanActor(_PopulationActor):
     """Information-matched mean-descriptor baseline."""
 
@@ -655,6 +744,26 @@ class MECFlatActor(_PopulationActor):
         return uavs.reshape(uavs.shape[0], -1)
 
 
+class MECSortFlatActor(_PopulationActor):
+    """Order-invariant full-state diagnostic using sorted UAV atoms."""
+
+    def __init__(
+        self, args, obs_space, action_space, num_agents, device
+    ):
+        super().__init__(
+            args,
+            obs_space,
+            action_space,
+            num_agents,
+            UAV_STATE_DIM * (int(num_agents) - 1),
+            device,
+        )
+
+    def _representation(self, uavs):
+        sorted_uavs = _lexsort_uavs(uavs)
+        return sorted_uavs.reshape(sorted_uavs.shape[0], -1)
+
+
 class MECSetActor(_PopulationActor):
     """Invariant population encoder with the common actor readout."""
 
@@ -678,14 +787,18 @@ class MECSetActor(_PopulationActor):
         self.set_actor_context = str(
             getattr(args, "mec_set_actor_context", "pooled")
         ).lower()
-        if self.set_actor_context not in {"pooled", "relational"}:
+        if self.set_actor_context not in {
+            "pooled",
+            "relational",
+            "cross_attention",
+        }:
             raise ValueError(
                 "mec_set_actor_context must be one of: "
-                "pooled, relational"
+                "pooled, relational, cross_attention"
             )
         if (
             population_encoder_type(args) == "flat_mlp"
-            and self.set_actor_context == "relational"
+            and self.set_actor_context != "pooled"
         ):
             raise ValueError(
                 "mec_set_encoder_type=flat_mlp supports only "
@@ -759,6 +872,15 @@ class MECSetActor(_PopulationActor):
                 use_orthogonal=args.use_orthogonal,
                 use_feature_normalization=args.use_feature_normalization,
             )
+        elif self.set_actor_context == "cross_attention":
+            del self.minor_fusion
+            self.minor_cross_attention = _UAVCrossAttentionReadout(
+                args,
+                representation_dim=representation_dim,
+                model_dim=model_dim,
+                num_heads=num_heads,
+                hidden_size=self.hidden_size,
+            )
         self.to(device)
 
     def population_representation(self, obs):
@@ -799,7 +921,7 @@ class MECSetActor(_PopulationActor):
     def _features(self, obs):
         if self.set_actor_encoder_mode == "separate":
             return self._features_separate_encoders(obs)
-        if self.set_actor_context != "relational":
+        if self.set_actor_context == "pooled":
             return super()._features(obs)
 
         team = self._reshape_team(obs)
@@ -812,6 +934,14 @@ class MECSetActor(_PopulationActor):
         major = self.major_fusion(
             torch.cat([public, representation], dim=-1)
         )
+        if self.set_actor_context == "cross_attention":
+            minor = self.minor_cross_attention(
+                uavs, public, representation, tokens
+            )
+            return torch.cat(
+                [major.unsqueeze(1), minor], dim=1
+            ).reshape(-1, self.hidden_size)
+
         public_uav = public.unsqueeze(1).expand(
             -1, self.num_uavs, -1
         )
@@ -841,7 +971,7 @@ class MECSetActor(_PopulationActor):
             torch.cat([public, major_representation], dim=-1)
         )
 
-        if self.set_actor_context == "relational":
+        if self.set_actor_context in {"relational", "cross_attention"}:
             minor_descriptor, tokens = (
                 self.minor_population_encoder.forward_with_tokens(uavs)
             )
@@ -857,6 +987,214 @@ class MECSetActor(_PopulationActor):
         representation_uav = minor_representation.unsqueeze(1).expand(
             -1, self.num_uavs, -1
         )
+        minor_inputs = [uavs, public_uav, representation_uav]
+        if tokens is not None:
+            minor_inputs.append(tokens)
+        minor = self.minor_fusion(torch.cat(minor_inputs, dim=-1))
+        return torch.cat(
+            [major.unsqueeze(1), minor], dim=1
+        ).reshape(-1, self.hidden_size)
+
+
+class MECRoleHybridActor(_GroupedRoleActor):
+    """Diagnostic actor with different HAP/UAV population readouts."""
+
+    def __init__(
+        self,
+        args,
+        obs_space,
+        action_space,
+        num_agents,
+        device,
+        *,
+        major_architecture: str,
+        minor_architecture: str,
+    ):
+        super().__init__(
+            args, obs_space, action_space, num_agents, device
+        )
+        self.major_architecture = str(major_architecture).lower()
+        self.minor_architecture = str(minor_architecture).lower()
+        allowed = {"flat", "set"}
+        if (
+            self.major_architecture not in allowed
+            or self.minor_architecture not in allowed
+        ):
+            raise ValueError(
+                "role hybrid actors currently support only flat/set "
+                "branches"
+            )
+        if self.major_architecture == self.minor_architecture:
+            raise ValueError(
+                "role hybrid diagnostics require different HAP/UAV "
+                "architectures"
+            )
+
+        self.set_actor_context = str(
+            getattr(args, "mec_set_actor_context", "pooled")
+        ).lower()
+        if self.set_actor_context not in {
+            "pooled",
+            "relational",
+            "cross_attention",
+        }:
+            raise ValueError(
+                "mec_set_actor_context must be one of: "
+                "pooled, relational, cross_attention"
+            )
+        if (
+            self.set_actor_context in {"relational", "cross_attention"}
+            and self.minor_architecture != "set"
+        ):
+            raise ValueError(
+                "non-pooled mec_set_actor_context only applies when the "
+                "UAV actor branch uses the Set encoder"
+            )
+        if (
+            self.minor_architecture == "set"
+            and self.set_actor_context != "pooled"
+            and population_encoder_type(args) == "flat_mlp"
+        ):
+            raise ValueError(
+                "mec_set_encoder_type=flat_mlp supports only "
+                "mec_set_actor_context=pooled"
+            )
+
+        use_relu = bool(args.use_ReLU)
+        self.set_model_dim = int(getattr(args, "mec_set_dim", 64))
+        self.flat_representation_dim = UAV_STATE_DIM * self.num_uavs
+        self.set_representation_dim = population_representation_dim(args)
+        major_dim = self._representation_dim(self.major_architecture)
+        minor_dim = self._representation_dim(self.minor_architecture)
+        minor_extra_dim = (
+            self.set_model_dim
+            if (
+                self.minor_architecture == "set"
+                and self.set_actor_context == "relational"
+            )
+            else 0
+        )
+
+        self.major_fusion = FusionMLP(
+            PUBLIC_STATE_DIM + major_dim,
+            self.hidden_size,
+            use_relu,
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
+        )
+        if self.set_actor_context == "cross_attention":
+            self.minor_cross_attention = _UAVCrossAttentionReadout(
+                args,
+                representation_dim=minor_dim,
+                model_dim=self.set_model_dim,
+                num_heads=int(getattr(args, "mec_set_heads", 4)),
+                hidden_size=self.hidden_size,
+            )
+        else:
+            self.minor_fusion = FusionMLP(
+                UAV_STATE_DIM
+                + PUBLIC_STATE_DIM
+                + minor_dim
+                + minor_extra_dim,
+                self.hidden_size,
+                use_relu,
+                layer_N=args.layer_N,
+                use_orthogonal=args.use_orthogonal,
+                use_feature_normalization=args.use_feature_normalization,
+            )
+
+        if self.major_architecture == "set":
+            self.major_population_encoder = build_population_encoder(
+                args,
+                atom_dim=UAV_STATE_DIM,
+                use_relu=use_relu,
+                num_atoms=self.num_uavs,
+            )
+        if self.minor_architecture == "set":
+            self.minor_population_encoder = build_population_encoder(
+                args,
+                atom_dim=UAV_STATE_DIM,
+                use_relu=use_relu,
+                num_atoms=self.num_uavs,
+            )
+        self.to(device)
+
+    def _representation_dim(self, architecture: str) -> int:
+        if architecture == "flat":
+            return self.flat_representation_dim
+        if architecture == "set":
+            return self.set_representation_dim
+        raise ValueError(f"unsupported role branch {architecture}")
+
+    def _flat_representation(self, uavs: torch.Tensor) -> torch.Tensor:
+        return uavs.reshape(uavs.shape[0], -1)
+
+    def _set_representation(self, uavs: torch.Tensor, role: str):
+        encoder = (
+            self.major_population_encoder
+            if role == "major"
+            else self.minor_population_encoder
+        )
+        if (
+            role == "minor"
+            and self.set_actor_context in {"relational", "cross_attention"}
+        ):
+            descriptor, tokens = encoder.forward_with_tokens(uavs)
+        else:
+            descriptor = encoder(uavs)
+            tokens = None
+        return descriptor.reshape(descriptor.shape[0], -1), tokens
+
+    def _branch_representation(self, architecture, uavs, role):
+        if architecture == "flat":
+            return self._flat_representation(uavs), None
+        return self._set_representation(uavs, role)
+
+    def population_representation(self, obs):
+        obs = check(obs).to(**self.tpdv)
+        team = self._reshape_team(obs)
+        uavs = team[:, 1:, _OWN]
+        major_representation, _ = self._branch_representation(
+            self.major_architecture, uavs, "major"
+        )
+        minor_representation, _ = self._branch_representation(
+            self.minor_architecture, uavs, "minor"
+        )
+        return torch.cat(
+            [major_representation, minor_representation], dim=-1
+        )
+
+    def _features(self, obs):
+        team = self._reshape_team(obs)
+        public = team[:, 0, _PUBLIC]
+        uavs = team[:, 1:, _OWN]
+
+        major_representation, _ = self._branch_representation(
+            self.major_architecture, uavs, "major"
+        )
+        major = self.major_fusion(
+            torch.cat([public, major_representation], dim=-1)
+        )
+
+        minor_representation, tokens = self._branch_representation(
+            self.minor_architecture, uavs, "minor"
+        )
+        if self.set_actor_context == "cross_attention":
+            minor = self.minor_cross_attention(
+                uavs, public, minor_representation, tokens
+            )
+            return torch.cat(
+                [major.unsqueeze(1), minor], dim=1
+            ).reshape(-1, self.hidden_size)
+
+        public_uav = public.unsqueeze(1).expand(
+            -1, self.num_uavs, -1
+        )
+        representation_uav = minor_representation.unsqueeze(1).expand(
+            -1, self.num_uavs, -1
+        )
+
         minor_inputs = [uavs, public_uav, representation_uav]
         if tokens is not None:
             minor_inputs.append(tokens)
@@ -929,7 +1267,7 @@ class MECTeamCritic(nn.Module):
                     "mec_set_critic_encoder must be one of: "
                     "actor_detached, separate, shared_grad"
                 )
-        elif architecture == "flat":
+        elif architecture in {"flat", "sort_flat"}:
             representation_dim = UAV_STATE_DIM * self.num_uavs
         elif architecture == "mean":
             representation_dim = UAV_STATE_DIM
@@ -1007,8 +1345,11 @@ class MECTeamCritic(nn.Module):
             )
         elif self.architecture == "mean":
             representation = uavs.mean(dim=1)
-        else:
+        elif self.architecture == "flat":
             representation = uavs.reshape(uavs.shape[0], -1)
+        else:
+            sorted_uavs = _lexsort_uavs(uavs)
+            representation = sorted_uavs.reshape(sorted_uavs.shape[0], -1)
 
         features = self.readout(
             torch.cat([public, representation], dim=-1)
@@ -1060,10 +1401,30 @@ class MECPolicy(R_MAPPOPolicy):
                 "cannot infer MEC fleet size from centralized "
                 f"observation dim {cent_dim}; pass num_agents"
             )
-        self.architecture = str(
+        self.actor_architecture = str(
             getattr(args, "mec_policy_arch", "mean")
         ).lower()
+        requested_critic_architecture = str(
+            getattr(args, "mec_critic_arch", "same")
+        ).lower()
+        if requested_critic_architecture == "same":
+            self.critic_architecture = self.actor_architecture
+        else:
+            self.critic_architecture = requested_critic_architecture
+        self.architecture = self.actor_architecture
         self.uses_grouped_batches = True
+        hybrid_actor_architectures = {
+            "set_hap_flat_uav",
+            "flat_hap_set_uav",
+        }
+        if (
+            self.actor_architecture in hybrid_actor_architectures
+            and requested_critic_architecture == "same"
+        ):
+            raise ValueError(
+                "role-isolated hybrid actors require an explicit "
+                "mec_critic_arch such as flat"
+            )
         set_critic_encoder_mode = str(
             getattr(args, "mec_set_critic_encoder", "actor_detached")
         ).lower()
@@ -1071,8 +1432,9 @@ class MECPolicy(R_MAPPOPolicy):
             getattr(args, "mec_set_actor_encoder", "shared")
         ).lower()
         if (
-            self.architecture == "set"
+            self.actor_architecture == "set"
             and set_actor_encoder_mode == "separate"
+            and self.critic_architecture == "set"
             and set_critic_encoder_mode != "separate"
         ):
             raise ValueError(
@@ -1080,26 +1442,38 @@ class MECPolicy(R_MAPPOPolicy):
                 "mec_set_critic_encoder=separate so the critic does not "
                 "implicitly choose one actor encoder"
             )
+        if self.actor_architecture == "legacy_mean":
+            if self.critic_architecture != "legacy_mean":
+                raise ValueError(
+                    "legacy_mean checkpoints do not support decoupled "
+                    "mec_critic_arch diagnostics"
+                )
+        elif self.critic_architecture == "legacy_mean":
+            raise ValueError(
+                "mec_critic_arch does not support legacy_mean; use "
+                "mec_policy_arch=legacy_mean for historical checkpoints"
+            )
         self.recompute_values_after_actor_update = (
-            self.architecture == "set"
+            self.actor_architecture == "set"
+            and self.critic_architecture == "set"
             and set_critic_encoder_mode in {"actor_detached", "shared_grad"}
         )
 
         expected_obs_dim = AGENT_OBS_DIM
         expected_cent_dim = team_state_dim(self.num_agents)
-        if self.architecture != "legacy_mean":
+        if self.actor_architecture != "legacy_mean":
             if obs_dim != expected_obs_dim:
                 raise ValueError(
-                    f"{self.architecture} expects local obs dim "
+                    f"{self.actor_architecture} expects local obs dim "
                     f"{expected_obs_dim}, got {obs_dim}"
                 )
             if cent_dim != expected_cent_dim:
                 raise ValueError(
-                    f"{self.architecture} expects centralized state dim "
+                    f"{self.actor_architecture} expects centralized state dim "
                     f"{expected_cent_dim}, got {cent_dim}"
                 )
 
-        if self.architecture == "legacy_mean":
+        if self.actor_architecture == "legacy_mean":
             self.actor = MECLegacyMeanActor(
                 args,
                 obs_space,
@@ -1110,7 +1484,7 @@ class MECPolicy(R_MAPPOPolicy):
             self.critic = MECLegacyMeanCritic(
                 args, self.num_agents, device
             )
-        elif self.architecture == "mean":
+        elif self.actor_architecture == "mean":
             self.actor = MECMeanActor(
                 args,
                 obs_space,
@@ -1118,14 +1492,7 @@ class MECPolicy(R_MAPPOPolicy):
                 self.num_agents,
                 device,
             )
-            self.critic = MECTeamCritic(
-                args,
-                cent_obs_space,
-                self.num_agents,
-                "mean",
-                device=device,
-            )
-        elif self.architecture == "flat":
+        elif self.actor_architecture == "flat":
             self.actor = MECFlatActor(
                 args,
                 obs_space,
@@ -1133,14 +1500,15 @@ class MECPolicy(R_MAPPOPolicy):
                 self.num_agents,
                 device,
             )
-            self.critic = MECTeamCritic(
+        elif self.actor_architecture == "sort_flat":
+            self.actor = MECSortFlatActor(
                 args,
-                cent_obs_space,
+                obs_space,
+                act_space,
                 self.num_agents,
-                "flat",
-                device=device,
+                device,
             )
-        elif self.architecture == "set":
+        elif self.actor_architecture == "set":
             self.actor = MECSetActor(
                 args,
                 obs_space,
@@ -1148,23 +1516,54 @@ class MECPolicy(R_MAPPOPolicy):
                 self.num_agents,
                 device,
             )
-            population_encoder = (
-                self.actor.population_encoder
-                if set_actor_encoder_mode == "shared"
-                else None
-            )
-            self.critic = MECTeamCritic(
+        elif self.actor_architecture == "set_hap_flat_uav":
+            self.actor = MECRoleHybridActor(
                 args,
-                cent_obs_space,
+                obs_space,
+                act_space,
                 self.num_agents,
-                "set",
-                population_encoder=population_encoder,
-                device=device,
+                device,
+                major_architecture="set",
+                minor_architecture="flat",
+            )
+        elif self.actor_architecture == "flat_hap_set_uav":
+            self.actor = MECRoleHybridActor(
+                args,
+                obs_space,
+                act_space,
+                self.num_agents,
+                device,
+                major_architecture="flat",
+                minor_architecture="set",
             )
         else:
             raise ValueError(
                 "mec_policy_arch must be one of: "
-                "legacy_mean, mean, flat, set"
+                "legacy_mean, mean, flat, sort_flat, set, "
+                "set_hap_flat_uav, flat_hap_set_uav"
+            )
+
+        population_encoder = None
+        if self.critic_architecture == "set":
+            if self.actor_architecture == "set":
+                population_encoder = (
+                    self.actor.population_encoder
+                    if set_actor_encoder_mode == "shared"
+                    else None
+                )
+            elif set_critic_encoder_mode != "separate":
+                raise ValueError(
+                    "mec_critic_arch=set with a non-Set actor requires "
+                    "mec_set_critic_encoder=separate"
+                )
+        if self.actor_architecture != "legacy_mean":
+            self.critic = MECTeamCritic(
+                args,
+                cent_obs_space,
+                self.num_agents,
+                self.critic_architecture,
+                population_encoder=population_encoder,
+                device=device,
             )
 
         self.actor_optimizer = torch.optim.Adam(

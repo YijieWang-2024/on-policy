@@ -57,6 +57,7 @@ def _args(architecture="set"):
         mec_logstd_init=-1.9,
         mec_rolewise_loss=True,
         mec_policy_arch=architecture,
+        mec_critic_arch="same",
         mec_set_encoder_type="latent_slots",
         mec_set_dim=32,
         mec_set_heads=4,
@@ -137,12 +138,12 @@ def test_canonical_team_state_layout():
     )
 
 
-def test_mean_and_set_are_invariant_and_equivariant():
+def test_mean_sort_flat_and_set_are_invariant_and_equivariant():
     teams = _team_obs(seed=8)
     permutation, permuted = _permuted(teams)
     rnn, masks = _rnn_masks()
 
-    for architecture in ("mean", "set"):
+    for architecture in ("mean", "sort_flat", "set"):
         torch.manual_seed(4)
         policy = _policy(architecture)
         with torch.no_grad():
@@ -205,6 +206,7 @@ def test_all_aligned_architectures_share_actor_and_critic_contracts():
     expected_rep_dims = {
         "mean": UAV_STATE_DIM,
         "flat": UAV_STATE_DIM * K,
+        "sort_flat": UAV_STATE_DIM * K,
         "set": 32 * 3,
     }
     for architecture, representation_dim in expected_rep_dims.items():
@@ -219,6 +221,120 @@ def test_all_aligned_architectures_share_actor_and_critic_contracts():
         assert policy.critic.readout.input_dim == (
             PUBLIC_STATE_DIM + representation_dim
         )
+
+
+def test_grouped_actor_features_preserve_role_row_binding():
+    policy = _policy("mean")
+    teams = _team_obs(seed=31)
+    teams[:, 1:, 1] = np.arange(1, K + 1, dtype=np.float32)
+
+    class MajorTag(torch.nn.Module):
+        def forward(self, features):
+            out = torch.zeros(
+                (*features.shape[:-1], policy.actor.hidden_size),
+                dtype=features.dtype,
+                device=features.device,
+            )
+            out[..., 0] = 10.0
+            return out
+
+    class MinorTag(torch.nn.Module):
+        def forward(self, features):
+            out = torch.zeros(
+                (*features.shape[:-1], policy.actor.hidden_size),
+                dtype=features.dtype,
+                device=features.device,
+            )
+            out[..., 0] = 20.0 + features[..., 0]
+            return out
+
+    policy.actor.major_fusion = MajorTag()
+    policy.actor.minor_fusion = MinorTag()
+
+    with torch.no_grad():
+        features = policy.actor._features(
+            torch.as_tensor(teams.reshape(-1, OBS_DIM))
+        ).reshape(N_ENV, N, -1)
+
+    torch.testing.assert_close(
+        features[:, 0, 0], torch.full((N_ENV,), 10.0)
+    )
+    expected_minor = torch.as_tensor(
+        20.0 + teams[:, 1:, 1], dtype=features.dtype
+    )
+    torch.testing.assert_close(features[:, 1:, 0], expected_minor)
+
+
+def test_grouped_actor_logprob_uses_role_specific_distribution():
+    policy = _policy("mean")
+    actor = policy.actor
+    teams = _team_obs(seed=32)
+    obs = torch.as_tensor(teams.reshape(-1, OBS_DIM))
+    rnn, masks = _rnn_masks()
+
+    def zero_features(input_obs):
+        return torch.zeros(
+            (input_obs.shape[0], actor.hidden_size),
+            dtype=input_obs.dtype,
+            device=input_obs.device,
+        )
+
+    actor._features = zero_features
+    with torch.no_grad():
+        actor.major_mean.weight.zero_()
+        actor.major_mean.bias.copy_(torch.tensor([-0.5, 0.25]))
+        actor.minor_mean.weight.zero_()
+        actor.minor_mean.bias.copy_(torch.tensor([0.5, -0.25]))
+        actor.minor_beta.weight.zero_()
+        actor.minor_beta.bias.zero_()
+
+    is_major = obs[:, 0:1] > 0.5
+    actions = torch.zeros((obs.shape[0], ACT_DIM), dtype=torch.float32)
+    actions[is_major[:, 0], :2] = torch.tensor([-0.5, 0.25])
+    actions[~is_major[:, 0], :2] = torch.tensor([0.5, -0.25])
+    actions[:, 2:3] = 0.5
+
+    base_log_probs, _ = actor.evaluate_actions(
+        obs, rnn, actions, masks
+    )
+
+    wrong_velocity = actions.clone()
+    wrong_velocity[is_major[:, 0], :2] = torch.tensor([0.5, -0.25])
+    wrong_velocity[~is_major[:, 0], :2] = torch.tensor([-0.5, 0.25])
+    wrong_log_probs, _ = actor.evaluate_actions(
+        obs, rnn, wrong_velocity, masks
+    )
+    assert torch.all(
+        base_log_probs[is_major[:, 0]]
+        > wrong_log_probs[is_major[:, 0]]
+    )
+    assert torch.all(
+        base_log_probs[~is_major[:, 0]]
+        > wrong_log_probs[~is_major[:, 0]]
+    )
+
+    changed_hap_beta = actions.clone()
+    changed_hap_beta[is_major[:, 0], 2] = 0.99
+    hap_beta_log_probs, _ = actor.evaluate_actions(
+        obs, rnn, changed_hap_beta, masks
+    )
+    torch.testing.assert_close(
+        base_log_probs[is_major[:, 0]],
+        hap_beta_log_probs[is_major[:, 0]],
+    )
+
+    changed_uav_beta = actions.clone()
+    changed_uav_beta[~is_major[:, 0], 2] = 0.99
+    uav_beta_log_probs, _ = actor.evaluate_actions(
+        obs, rnn, changed_uav_beta, masks
+    )
+    assert torch.any(
+        torch.abs(
+            base_log_probs[~is_major[:, 0]]
+            - uav_beta_log_probs[~is_major[:, 0]]
+        )
+        > 1e-4
+    )
 
 
 def test_aligned_readouts_keep_legacy_mlp_contract():
@@ -522,6 +638,65 @@ def test_set_relational_actor_context_is_equivariant():
     )
 
 
+def test_set_cross_attention_actor_context_is_equivariant():
+    args = _args("set")
+    args.mec_set_actor_context = "cross_attention"
+    torch.manual_seed(16)
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    representation_dim = args.mec_set_dim * args.mec_set_num_seeds
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + representation_dim
+    )
+    assert policy.actor.minor_cross_attention.fusion.input_dim == (
+        UAV_STATE_DIM
+        + PUBLIC_STATE_DIM
+        + representation_dim
+        + 2 * args.mec_set_dim
+    )
+
+    teams = _team_obs(seed=24)
+    permutation, permuted = _permuted(teams)
+    rnn, masks = _rnn_masks()
+    with torch.no_grad():
+        actions, _ = policy.act(
+            teams.reshape(-1, OBS_DIM),
+            rnn,
+            masks,
+            deterministic=True,
+        )
+        actions_perm, _ = policy.act(
+            permuted.reshape(-1, OBS_DIM),
+            rnn,
+            masks,
+            deterministic=True,
+        )
+    actions = actions.reshape(N_ENV, N, ACT_DIM)
+    actions_perm = actions_perm.reshape(N_ENV, N, ACT_DIM)
+    torch.testing.assert_close(actions[:, 0], actions_perm[:, 0])
+    torch.testing.assert_close(
+        actions[:, 1:][:, permutation], actions_perm[:, 1:]
+    )
+
+
+def test_flat_mlp_set_actor_rejects_token_readouts():
+    for context in ("relational", "cross_attention"):
+        args = _args("set")
+        args.mec_set_encoder_type = "flat_mlp"
+        args.mec_set_actor_context = context
+        with pytest.raises(ValueError, match="flat_mlp"):
+            MECPolicy(
+                args,
+                *_spaces(),
+                torch.device("cpu"),
+                num_agents=N,
+            )
+
+
 def test_set_mean_pool_encoder_contract_is_invariant():
     args = _args("set")
     args.mec_set_encoder_type = "mean_pool"
@@ -585,6 +760,181 @@ def test_set_mean_pool_encoder_contract_is_invariant():
         actions[:, 1:][:, permutation], actions_perm[:, 1:]
     )
     torch.testing.assert_close(values, values_perm)
+
+
+def test_role_hybrid_actor_contracts_require_explicit_critic():
+    for architecture in ("set_hap_flat_uav", "flat_hap_set_uav"):
+        args = _args(architecture)
+        with pytest.raises(ValueError, match="explicit"):
+            MECPolicy(
+                args,
+                *_spaces(),
+                torch.device("cpu"),
+                num_agents=N,
+            )
+
+    args = _args("set_hap_flat_uav")
+    args.mec_critic_arch = "flat"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    set_dim = args.mec_set_dim * args.mec_set_num_seeds
+    flat_dim = UAV_STATE_DIM * K
+    assert policy.actor.major_architecture == "set"
+    assert policy.actor.minor_architecture == "flat"
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + set_dim
+    )
+    assert policy.actor.minor_fusion.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM + flat_dim
+    )
+    assert policy.critic.readout.input_dim == (
+        PUBLIC_STATE_DIM + flat_dim
+    )
+
+    args = _args("flat_hap_set_uav")
+    args.mec_critic_arch = "flat"
+    args.mec_set_actor_context = "relational"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    assert policy.actor.major_architecture == "flat"
+    assert policy.actor.minor_architecture == "set"
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + flat_dim
+    )
+    assert policy.actor.minor_fusion.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM + set_dim + args.mec_set_dim
+    )
+
+    args = _args("flat_hap_set_uav")
+    args.mec_critic_arch = "flat"
+    args.mec_set_actor_context = "cross_attention"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    assert policy.actor.major_architecture == "flat"
+    assert policy.actor.minor_architecture == "set"
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + flat_dim
+    )
+    assert policy.actor.minor_cross_attention.fusion.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM + set_dim + 2 * args.mec_set_dim
+    )
+
+
+def test_flat_hap_set_uav_routes_minor_set_gradients():
+    args = _args("flat_hap_set_uav")
+    args.mec_critic_arch = "flat"
+    args.mec_set_encoder_type = "mean_pool"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    teams = _team_obs(seed=23)
+    obs = teams.reshape(-1, OBS_DIM)
+    cent = _central_obs(teams).reshape(N_ENV * N, -1)
+    rnn, masks = _rnn_masks()
+    _, actions, _, _, _ = policy.get_actions(
+        cent, obs, rnn, rnn, masks
+    )
+    is_major = torch.as_tensor(obs[:, 0:1] > 0.5)
+
+    policy.actor_optimizer.zero_grad()
+    _, log_probs, _ = policy.evaluate_actions(
+        cent,
+        obs,
+        rnn,
+        rnn,
+        actions.detach(),
+        masks,
+    )
+    (-log_probs[is_major[:, 0]].mean()).backward()
+    assert all(
+        parameter.grad is None or parameter.grad.abs().sum() == 0
+        for parameter in policy.actor.minor_population_encoder.parameters()
+    )
+
+    policy.actor_optimizer.zero_grad()
+    _, log_probs, _ = policy.evaluate_actions(
+        cent,
+        obs,
+        rnn,
+        rnn,
+        actions.detach(),
+        masks,
+    )
+    (-log_probs[~is_major[:, 0]].mean()).backward()
+    assert any(
+        parameter.grad is not None
+        and torch.isfinite(parameter.grad).all()
+        and parameter.grad.abs().sum() > 0
+        for parameter in policy.actor.minor_population_encoder.parameters()
+    )
+
+
+def test_flat_hap_set_uav_cross_attention_routes_minor_set_gradients():
+    args = _args("flat_hap_set_uav")
+    args.mec_critic_arch = "flat"
+    args.mec_set_encoder_type = "mean_pool"
+    args.mec_set_actor_context = "cross_attention"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    teams = _team_obs(seed=25)
+    obs = teams.reshape(-1, OBS_DIM)
+    cent = _central_obs(teams).reshape(N_ENV * N, -1)
+    rnn, masks = _rnn_masks()
+    _, actions, _, _, _ = policy.get_actions(
+        cent, obs, rnn, rnn, masks
+    )
+    is_major = torch.as_tensor(obs[:, 0:1] > 0.5)
+
+    policy.actor_optimizer.zero_grad()
+    _, log_probs, _ = policy.evaluate_actions(
+        cent,
+        obs,
+        rnn,
+        rnn,
+        actions.detach(),
+        masks,
+    )
+    (-log_probs[is_major[:, 0]].mean()).backward()
+    assert all(
+        parameter.grad is None or parameter.grad.abs().sum() == 0
+        for parameter in policy.actor.minor_population_encoder.parameters()
+    )
+
+    policy.actor_optimizer.zero_grad()
+    _, log_probs, _ = policy.evaluate_actions(
+        cent,
+        obs,
+        rnn,
+        rnn,
+        actions.detach(),
+        masks,
+    )
+    (-log_probs[~is_major[:, 0]].mean()).backward()
+    assert any(
+        parameter.grad is not None
+        and torch.isfinite(parameter.grad).all()
+        and parameter.grad.abs().sum() > 0
+        for parameter in policy.actor.minor_population_encoder.parameters()
+    )
 
 
 def test_set_critic_does_not_own_or_update_encoder():
@@ -695,6 +1045,75 @@ def test_set_separate_critic_encoder_gets_value_gradients():
         parameter.grad is None
         for parameter in policy.actor.population_encoder.parameters()
     )
+
+
+def test_set_actor_can_use_flat_critic_for_diagnostics():
+    args = _args("set")
+    args.mec_set_encoder_type = "mean_pool"
+    args.mec_critic_arch = "flat"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    assert policy.actor_architecture == "set"
+    assert policy.critic_architecture == "flat"
+    assert not policy.recompute_values_after_actor_update
+    assert policy.critic.readout.input_dim == (
+        PUBLIC_STATE_DIM + UAV_STATE_DIM * K
+    )
+    encoder_parameters = {
+        id(parameter)
+        for parameter in policy.actor.population_encoder.parameters()
+    }
+    critic_parameters = {
+        id(parameter) for parameter in policy.critic.parameters()
+    }
+    assert encoder_parameters.isdisjoint(critic_parameters)
+
+
+def test_flat_actor_can_use_separate_set_critic_for_diagnostics():
+    args = _args("flat")
+    args.mec_critic_arch = "set"
+    args.mec_set_encoder_type = "mean_pool"
+    args.mec_set_critic_encoder = "separate"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    assert policy.actor_architecture == "flat"
+    assert policy.critic_architecture == "set"
+    assert not policy.recompute_values_after_actor_update
+    assert hasattr(policy.critic, "population_encoder")
+
+    teams = _team_obs(seed=19)
+    cent = _central_obs(teams).reshape(N_ENV * N, -1)
+    rnn, masks = _rnn_masks()
+    policy.critic_optimizer.zero_grad()
+    values = policy.get_values(cent, rnn, masks)
+    values.sum().backward()
+    assert any(
+        parameter.grad is not None
+        and torch.isfinite(parameter.grad).all()
+        and parameter.grad.abs().sum() > 0
+        for parameter in policy.critic.population_encoder.parameters()
+    )
+
+
+def test_set_critic_with_non_set_actor_requires_separate_encoder():
+    args = _args("flat")
+    args.mec_critic_arch = "set"
+    args.mec_set_critic_encoder = "actor_detached"
+    with pytest.raises(ValueError, match="separate"):
+        MECPolicy(
+            args,
+            *_spaces(),
+            torch.device("cpu"),
+            num_agents=N,
+        )
 
 
 def test_set_separate_actor_encoders_route_role_gradients():

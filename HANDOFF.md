@@ -581,3 +581,191 @@ The next useful phase should be analysis of the descriptor/readout interface:
 gradient scales, feature statistics, action sensitivity to individual UAV
 atoms, and optimizer/loss coupling across Mean, Flat, mean_pool, flat_mlp, and
 latent_slots.
+
+## 19. 2026-06-28: public descriptor / actor-critic coupling gate
+
+The next diagnostic stayed inside the paper's public descriptor framing.  It
+did not introduce query-conditioned per-agent descriptors.  Instead, it asked
+whether a public `z=f({uavs})` descriptor can support control when the
+descriptor is non-learned and information-preserving, and whether Set failure
+is mainly actor-side or critic-side.
+
+New diagnostic switches:
+
+```text
+--mec_policy_arch sort_flat
+--mec_critic_arch same|mean|flat|sort_flat|set
+```
+
+`sort_flat` sorts normalized UAV atoms by `(x, y, queue)` and then flattens
+them.  It is a public, order-invariant, fixed-K descriptor used only as a
+diagnostic.
+
+400k seed-1 protocol: 350 slots, `mec_logstd_init=-1.2`, 403.2k environment
+steps / 72 PPO updates, validation seed 1000, held-out seed 100000 with stride
+13 over 24 episodes.
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| sort_flat actor + sort_flat critic | -1181.68 | 403.2k | 3.5106 | 55.1% | 968.9 m | +0.3% |
+| Set mean_pool actor + Flat critic | -1514.10 | 302.4k | 4.6383 | 40.0% | 1230.4 m | -1.6% |
+| Flat actor + Set mean_pool critic | -1433.38 | 201.6k | 4.2400 | 44.4% | 1155.3 m | -0.0% |
+
+Interpretation:
+
+- `sort_flat` partially recovers UAV coverage, so a public order-invariant
+  descriptor is not intrinsically impossible.  But it still does not learn a
+  load-bearing HAP trajectory and remains far worse than working Mean/Flat.
+- `Set actor + Flat critic` remains failed, so a bad Set critic is not the
+  sole explanation.  The learnable Set actor descriptor is not control-readable.
+- `Flat actor + Set critic` also fails, so the Set critic path can independently
+  corrupt the advantage signal even when the actor has Flat information.
+
+Current root-cause hypothesis: public descriptor theory remains viable, but the
+descriptor must be explicitly control-readable.  Pure geometry reconstruction,
+vanilla Set-MAPPO, and simple actor/critic ownership changes have not created
+that representation.  Next, run descriptor/readout probes and gradient/action
+sensitivity audits before proposing another algorithm branch.
+
+## 20. 2026-06-28: 1.5M rerun of the three descriptor diagnostics
+
+The user correctly noted that the 400k/112k gates were too short to judge some
+curves.  The same three diagnostics were rerun to 1.5M environment steps with
+three parallel workers.  The machine handled this parallel run cleanly; all
+training stderr logs remained empty.  The wrapper misclassified the run as
+failed because `Start-Process` returned an empty `ExitCode` even though
+checkpoint artifacts existed, so held-out evaluation was run manually from
+`models\best`.  The wrapper now treats empty `ExitCode` plus complete artifacts
+and empty stderr as success.
+
+Protocol: 350 slots, seed 1, validation seed 1000 over 24 episodes, held-out
+seed 100000 with stride 13 over 24 episodes.
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| sort_flat actor + sort_flat critic | -829.19 | 1.3104M | 2.5370 | 69.5% | 800.0 m | +8.6% |
+| Set mean_pool actor + Flat critic | -1417.86 | 1.4952M | 4.0030 | 48.4% | 1087.8 m | +8.4% |
+| Flat actor + Set mean_pool critic | -750.21 | 1.4112M | 2.2201 | 73.2% | 710.8 m | +11.2% |
+
+Artifacts:
+
+```text
+eval_outputs/descriptor_diagnostics_400k/diag1500_desc.summary.json
+training_logs/diag1500_desc_*.log
+onpolicy/scripts/results/MEC/v6_hap_loadbearing/mappo/diag1500_desc_*/run1/models/best
+```
+
+Important correction to section 19: the 400k conclusion that the Set critic
+path independently poisons the advantage signal was premature.  `Flat actor +
+Set critic` is slow early but recovers strongly by 1.5M and is the best of
+these three runs.  The stable failure is specifically actor-side: `Set actor +
+Flat critic` remains much worse even with enough steps.
+
+Current root-cause hypothesis after 1.5M: the problematic path is "first learn
+a shared public Set descriptor, then let each actor read fine-grained control
+from that compressed descriptor plus local/env features."  Public descriptors
+are still compatible with the paper goal, but the actor descriptor must be
+explicitly readout-aligned/control-readable.  Later cross-attention work
+confirmed this diagnosis only partially: better UAV-local readout helps, but
+the result is still not strong enough to serve as the final theory-supporting
+algorithm.
+
+## 21. 2026-06-28: actor role-isolation pinpoints UAV readout
+
+The grouped actor binding concern was addressed first with tests.  New tests
+cover grouped `_features()` row binding, role-specific log-prob selection, and
+hybrid actor gradient routing.  The relevant suite passes:
+
+```text
+30 passed
+```
+
+Two role-isolated actor architectures were added:
+
+```text
+--mec_policy_arch set_hap_flat_uav --mec_critic_arch flat
+--mec_policy_arch flat_hap_set_uav --mec_critic_arch flat
+```
+
+`flat_hap_set_uav` also supports `--mec_set_actor_context relational`, giving
+each UAV branch its equivariant token in addition to the invariant descriptor.
+
+1.5M role-isolation results, seed 1, 350 slots, validation seed 1000,
+held-out seed 100000 stride 13 over 24 episodes:
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| Set-HAP + Flat-UAV actor, Flat critic | -765.42 | 1.1088M | 2.2900 | 73.6% | 710.4 m | +3.5% |
+| Flat-HAP + Set-UAV actor, Flat critic | -1440.57 | 1.4112M | 4.2534 | 45.5% | 1133.8 m | -0.7% |
+| Flat-HAP + Set-UAV relational actor, Flat critic | -1269.49 | 1.4952M | 3.5498 | 55.8% | 941.5 m | +6.7% |
+
+Artifacts:
+
+```text
+scripts/run_v6_actor_role_isolation_1500k.ps1
+eval_outputs/actor_role_isolation_1500k/diag1500_roleiso.summary.json
+training_logs/diag1500_roleiso_*.log
+```
+
+Conclusion: the root cause is now more specific than "Set actor descriptor is
+not readable."  The failing part is the UAV actor readout from Set information.
+HAP can use a Set descriptor when the UAV branch keeps Flat information.
+Pooled Set-UAV remains failed at 1.5M, and relational tokens improve it but do
+not solve it.
+
+Next algorithm direction at that point: design a stronger UAV-local equivariant
+readout over Set tokens/slots, while retaining the invariant/public descriptor
+for global coordination.  Cross-attention was then tested and gave a real but
+insufficient gain.  Do not spend more budget on pure pooled Set actor PPO
+sweeps, and do not move to Flat-teacher or behavior-cloning warmups as the next
+step.
+
+## 22. 2026-06-28: Set-UAV cross-attention readout is the first working fix
+
+Implemented `--mec_set_actor_context cross_attention` for Set actors and
+`flat_hap_set_uav`.  The encoder still learns the invariant public descriptor
+`z=f({uavs})` and equivariant UAV tokens; query-conditioned computation is only
+in the downstream UAV readout.  This is compatible with the paper framing:
+the descriptor is still a group representation, while the actor decoder reads
+it through local UAV queries.
+
+New tests cover cross-attention equivariance, invalid flat-MLP/token readout
+combinations, and Set-UAV gradient routing.  Verification:
+
+```text
+33 passed
+git diff --check  # CRLF warnings only
+```
+
+1.5M seed-1 comparison, all with `flat_hap_set_uav`, `mean_pool` Set encoder,
+Flat critic, validation seed 1000 and held-out seed 100000:
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| pooled Set-UAV readout | -1440.57 | 1.4112M | 4.2534 | 45.5% | 1133.8 m | -0.7% |
+| relational token Set-UAV readout | -1269.49 | 1.4952M | 3.5498 | 55.8% | 941.5 m | +6.7% |
+| cross-attention Set-UAV readout | -1061.36 | 1.4952M | 3.1444 | 60.8% | 865.3 m | +20.8% |
+
+Artifacts:
+
+```text
+scripts/run_v6_cross_attention_readout_1500k.ps1
+eval_outputs/cross_attention_readout_1500k/diag1500_crossreadout.summary.json
+training_logs/diag1500_crossreadout_*.log
+```
+
+Conclusion: the root-cause diagnosis is experimentally supported, but the
+algorithm is not yet paper-ready.  The pooled public descriptor path is the
+failure mode; UAV-local/equivariant token readout improves it, and
+cross-attention improves it substantially.  However, the new branch is still
+weaker than the Flat-UAV references (`Set-HAP + Flat-UAV` cost/slot 2.2900 and
+`Flat actor + Set critic` 2.2201).  Archive this as a partial algorithmic
+advance, not as the final SetRec architecture.
+
+Current stop decision: do not continue with Flat-teacher warmup, heuristic
+behavior cloning, or more auxiliary-control hybrids.  Those may improve a
+controller, but they would no longer answer the paper's central architecture
+question.  The next phase should be a written theory/architecture redesign:
+define exactly what public group representation is claimed, what local decoder
+queries are allowed, and what minimal trainable readout can support that claim
+without importing an ordered Flat teacher.

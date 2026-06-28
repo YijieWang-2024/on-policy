@@ -1,10 +1,42 @@
 # SetRec-MAPPO Architecture Contract
 
-Status: implementation contract, updated 2026-06-25.
+Status: diagnostic implementation contract, archived 2026-06-28.
 
 This document defines the current algorithm design. Historical environment
 decisions remain in `mec_env_port_spec.md`; current experiment commands remain in
 `mec_runbook.md`.
+
+## 0. Archive status after recent diagnostics
+
+The current codebase contains several useful MEC/SetRec diagnostics, but the
+algorithmic contract below should not be treated as the final paper algorithm.
+Recent 1.5M-step gates showed:
+
+- the original pooled Set actor path fails robustly;
+- the failure is actor-side, and more specifically UAV-readout-side;
+- HAP can use a Set descriptor when the UAV branch keeps Flat information;
+- giving UAVs equivariant tokens helps;
+- UAV-conditioned cross-attention helps more, but still does not match the
+  Flat-UAV references.
+
+Representative held-out results:
+
+| variant | cost/slot | accept | W1 | note |
+|---|---:|---:|---:|---|
+| Flat actor + Set critic | 2.2201 | 73.2% | 710.8 m | Set critic can work when actor has Flat information |
+| Set-HAP + Flat-UAV actor | 2.2900 | 73.6% | 710.4 m | HAP-side Set is not the main blocker |
+| Flat-HAP + Set-UAV pooled | 4.2534 | 45.5% | 1133.8 m | broken UAV Set readout |
+| Flat-HAP + Set-UAV relational | 3.5498 | 55.8% | 941.5 m | tokens help, not enough |
+| Flat-HAP + Set-UAV cross-attention | 3.1444 | 60.8% | 865.3 m | best Set-UAV result so far, still short |
+
+The immediate archive decision is to pause further algorithm branches that
+would import an ordered Flat teacher, heuristic behavior cloning, or more
+auxiliary-control hybrids.  Those may improve engineering performance, but
+they do not yet answer the paper's core claim: how a learned public,
+order-invariant representation supports control in this heterogeneous
+HAP/UAV setting.  The next phase should first rewrite the theory/architecture
+contract: what representation is public, what local/equivariant decoder queries
+are allowed, and what minimal trainable architecture follows from that claim.
 
 ## 1. State and information contract
 
@@ -95,9 +127,11 @@ d = 64, heads = 4, M = 4,
 element SAB blocks = 2, latent SAB blocks = 1.
 ```
 
-The encoder may create permutation-equivariant element tokens internally. They
-are not exposed to the actor, critic, or decoder. The only public population
-interface is the permutation-invariant descriptor `xi`.
+The encoder may create permutation-equivariant element tokens internally.  The
+original phase-1 contract exposed only the permutation-invariant descriptor
+`xi`; later diagnostics also exposed tokens to the UAV readout.  That exposure
+is best understood as a decoder/readout diagnostic, not yet as a settled final
+paper contract.
 
 ## 4. Actor and critic
 
@@ -202,6 +236,10 @@ Diagnostic variants now available:
   the preferred final algorithm.
 - `--mec_set_actor_context relational` gives each UAV its equivariant
   self-attention token in addition to the invariant pooled descriptor.
+- `--mec_set_actor_context cross_attention` lets each UAV form a local query
+  from `[s_i, p, token_i]` and read from the equivariant token memory before
+  fusing `[s_i, p, xi, token_i, context_i]`. This is the strongest Set-UAV
+  diagnostic so far, but it remains below the Flat-UAV references.
 
 Phase 2, revised after the first Chamfer MVP:
 
@@ -248,6 +286,13 @@ Before training:
 4. Add reconstruction and compare Set-MAPPO against SetRec-MAPPO.
 5. Only after stable three-seed evidence, run long training, cross-K evaluation,
    and final paper experiments.
+
+Archive update, 2026-06-28: this original experiment order is superseded for
+the current branch.  The available evidence is no longer pointing to "add one
+more auxiliary trick"; it points to a mismatch between the theoretical
+representation claim and the actor decoder/readout needed for control.  Do not
+advance to final paper experiments or teacher/imitation warmups from this
+branch without first rewriting that contract.
 
 ## 9. Phase-1 gate result (2026-06-26)
 

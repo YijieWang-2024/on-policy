@@ -250,10 +250,31 @@ def get_config():
         "--mec_policy_arch",
         type=str,
         default="mean",
-        choices=["legacy_mean", "mean", "flat", "set"],
+        choices=[
+            "legacy_mean",
+            "mean",
+            "flat",
+            "sort_flat",
+            "set",
+            "set_hap_flat_uav",
+            "flat_hap_set_uav",
+        ],
         help=(
-            "MEC population representation: aligned mean, ordered flat, "
-            "invariant set, or legacy_mean for historical checkpoints"
+            "MEC actor population representation: aligned mean, ordered "
+            "flat, lexicographically sorted flat, invariant set, or "
+            "role-isolated Set/Flat hybrids; legacy_mean is for "
+            "historical checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--mec_critic_arch",
+        type=str,
+        default="same",
+        choices=["same", "mean", "flat", "sort_flat", "set"],
+        help=(
+            "MEC critic population representation diagnostic. 'same' uses "
+            "mec_policy_arch; other values decouple actor and critic "
+            "representations for ablations such as Set actor + Flat critic."
         ),
     )
     parser.add_argument(
@@ -327,11 +348,13 @@ def get_config():
         "--mec_set_actor_context",
         type=str,
         default="pooled",
-        choices=["pooled", "relational"],
+        choices=["pooled", "relational", "cross_attention"],
         help=(
             "Set actor UAV context: pooled uses only the invariant "
             "population descriptor, while relational also gives each UAV "
-            "its equivariant self-attention token"
+            "its equivariant self-attention token; cross_attention lets "
+            "each UAV decode from the equivariant token memory while still "
+            "conditioning on the invariant descriptor"
         ),
     )
     parser.add_argument(

@@ -7,7 +7,7 @@ class _Writer:
     def __init__(self):
         self.logged = []
 
-    def add_scalars(self, key, value, step):
+    def add_scalar(self, key, value, step):
         self.logged.append((key, value, step))
 
 
@@ -34,7 +34,7 @@ def test_validation_logging_does_not_reuse_stale_training_infos():
     assert runner.writter.logged == [
         (
             "eval_average_episode_rewards",
-            {"eval_average_episode_rewards": -3.0},
+            -3.0,
             100,
         )
     ]
