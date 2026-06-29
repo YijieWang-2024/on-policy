@@ -348,13 +348,19 @@ def get_config():
         "--mec_set_actor_context",
         type=str,
         default="pooled",
-        choices=["pooled", "relational", "cross_attention"],
+        choices=[
+            "pooled",
+            "relational",
+            "slot_attention",
+            "cross_attention",
+        ],
         help=(
             "Set actor UAV context: pooled uses only the invariant "
             "population descriptor, while relational also gives each UAV "
-            "its equivariant self-attention token; cross_attention lets "
-            "each UAV decode from the equivariant token memory while still "
-            "conditioning on the invariant descriptor"
+            "its equivariant self-attention token; slot_attention lets each "
+            "UAV decode from invariant latent slots only; cross_attention "
+            "lets each UAV decode from the equivariant token memory while "
+            "still conditioning on the invariant descriptor"
         ),
     )
     parser.add_argument(

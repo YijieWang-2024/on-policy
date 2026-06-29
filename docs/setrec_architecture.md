@@ -5,6 +5,7 @@ Status: diagnostic implementation contract, archived 2026-06-28.
 This document defines the current algorithm design. Historical environment
 decisions remain in `mec_env_port_spec.md`; current experiment commands remain in
 `mec_runbook.md`.
+The next readout gate is specified in `readout_contract.md`.
 
 ## 0. Archive status after recent diagnostics
 
@@ -236,6 +237,10 @@ Diagnostic variants now available:
   the preferred final algorithm.
 - `--mec_set_actor_context relational` gives each UAV its equivariant
   self-attention token in addition to the invariant pooled descriptor.
+- `--mec_set_actor_context slot_attention` lets each UAV form a local query
+  from `[s_i, p]` and attend only to invariant latent population slots.  This
+  is the clean EqDec candidate for testing whether the public descriptor is
+  control-readable without per-UAV token memory.
 - `--mec_set_actor_context cross_attention` lets each UAV form a local query
   from `[s_i, p, token_i]` and read from the equivariant token memory before
   fusing `[s_i, p, xi, token_i, context_i]`. This is the strongest Set-UAV

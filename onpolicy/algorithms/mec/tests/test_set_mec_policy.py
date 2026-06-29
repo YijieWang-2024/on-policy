@@ -683,8 +683,56 @@ def test_set_cross_attention_actor_context_is_equivariant():
     )
 
 
+def test_set_slot_attention_actor_context_is_equivariant():
+    args = _args("set")
+    args.mec_set_actor_context = "slot_attention"
+    torch.manual_seed(17)
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    representation_dim = args.mec_set_dim * args.mec_set_num_seeds
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + representation_dim
+    )
+    assert policy.actor.minor_cross_attention.query.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM
+    )
+    assert policy.actor.minor_cross_attention.fusion.input_dim == (
+        UAV_STATE_DIM
+        + PUBLIC_STATE_DIM
+        + representation_dim
+        + 2 * args.mec_set_dim
+    )
+
+    teams = _team_obs(seed=26)
+    permutation, permuted = _permuted(teams)
+    rnn, masks = _rnn_masks()
+    with torch.no_grad():
+        actions, _ = policy.act(
+            teams.reshape(-1, OBS_DIM),
+            rnn,
+            masks,
+            deterministic=True,
+        )
+        actions_perm, _ = policy.act(
+            permuted.reshape(-1, OBS_DIM),
+            rnn,
+            masks,
+            deterministic=True,
+        )
+    actions = actions.reshape(N_ENV, N, ACT_DIM)
+    actions_perm = actions_perm.reshape(N_ENV, N, ACT_DIM)
+    torch.testing.assert_close(actions[:, 0], actions_perm[:, 0])
+    torch.testing.assert_close(
+        actions[:, 1:][:, permutation], actions_perm[:, 1:]
+    )
+
+
 def test_flat_mlp_set_actor_rejects_token_readouts():
-    for context in ("relational", "cross_attention"):
+    for context in ("relational", "slot_attention", "cross_attention"):
         args = _args("set")
         args.mec_set_encoder_type = "flat_mlp"
         args.mec_set_actor_context = context
@@ -815,6 +863,27 @@ def test_role_hybrid_actor_contracts_require_explicit_critic():
 
     args = _args("flat_hap_set_uav")
     args.mec_critic_arch = "flat"
+    args.mec_set_actor_context = "slot_attention"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    assert policy.actor.major_architecture == "flat"
+    assert policy.actor.minor_architecture == "set"
+    assert policy.actor.minor_cross_attention.query.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM
+    )
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + flat_dim
+    )
+    assert policy.actor.minor_cross_attention.fusion.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM + set_dim + 2 * args.mec_set_dim
+    )
+
+    args = _args("flat_hap_set_uav")
+    args.mec_critic_arch = "flat"
     args.mec_set_actor_context = "cross_attention"
     policy = MECPolicy(
         args,
@@ -829,6 +898,59 @@ def test_role_hybrid_actor_contracts_require_explicit_critic():
     )
     assert policy.actor.minor_cross_attention.fusion.input_dim == (
         UAV_STATE_DIM + PUBLIC_STATE_DIM + set_dim + 2 * args.mec_set_dim
+    )
+
+
+def test_flat_hap_set_uav_slot_attention_routes_minor_set_gradients():
+    args = _args("flat_hap_set_uav")
+    args.mec_critic_arch = "flat"
+    args.mec_set_encoder_type = "mean_pool"
+    args.mec_set_actor_context = "slot_attention"
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    teams = _team_obs(seed=28)
+    obs = teams.reshape(-1, OBS_DIM)
+    cent = _central_obs(teams).reshape(N_ENV * N, -1)
+    rnn, masks = _rnn_masks()
+    _, actions, _, _, _ = policy.get_actions(
+        cent, obs, rnn, rnn, masks
+    )
+    is_major = torch.as_tensor(obs[:, 0:1] > 0.5)
+
+    policy.actor_optimizer.zero_grad()
+    _, log_probs, _ = policy.evaluate_actions(
+        cent,
+        obs,
+        rnn,
+        rnn,
+        actions.detach(),
+        masks,
+    )
+    (-log_probs[is_major[:, 0]].mean()).backward()
+    assert all(
+        parameter.grad is None or parameter.grad.abs().sum() == 0
+        for parameter in policy.actor.minor_population_encoder.parameters()
+    )
+
+    policy.actor_optimizer.zero_grad()
+    _, log_probs, _ = policy.evaluate_actions(
+        cent,
+        obs,
+        rnn,
+        rnn,
+        actions.detach(),
+        masks,
+    )
+    (-log_probs[~is_major[:, 0]].mean()).backward()
+    assert any(
+        parameter.grad is not None
+        and torch.isfinite(parameter.grad).all()
+        and parameter.grad.abs().sum() > 0
+        for parameter in policy.actor.minor_population_encoder.parameters()
     )
 
 
@@ -1239,17 +1361,18 @@ def test_set_reconstruction_aux_requires_shared_actor_encoder():
         )
 
 
-def test_set_flat_mlp_rejects_relational_actor_context():
-    args = _args("set")
-    args.mec_set_encoder_type = "flat_mlp"
-    args.mec_set_actor_context = "relational"
-    with pytest.raises(ValueError, match="flat_mlp"):
-        MECPolicy(
-            args,
-            *_spaces(),
-            torch.device("cpu"),
-            num_agents=N,
-        )
+def test_set_flat_mlp_rejects_non_pooled_actor_context():
+    for context in ("relational", "slot_attention", "cross_attention"):
+        args = _args("set")
+        args.mec_set_encoder_type = "flat_mlp"
+        args.mec_set_actor_context = context
+        with pytest.raises(ValueError, match="flat_mlp"):
+            MECPolicy(
+                args,
+                *_spaces(),
+                torch.device("cpu"),
+                num_agents=N,
+            )
 
 
 def test_grouped_generator_preserves_complete_team_rows():

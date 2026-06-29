@@ -639,13 +639,14 @@ class _PopulationActor(_GroupedRoleActor):
 
 
 class _UAVCrossAttentionReadout(nn.Module):
-    """Equivariant UAV decoder that reads the encoded population tokens."""
+    """Equivariant UAV decoder over shared population memory."""
 
     def __init__(
         self,
         args,
         *,
         representation_dim: int,
+        query_input_dim: int,
         model_dim: int,
         num_heads: int,
         hidden_size: int,
@@ -653,7 +654,7 @@ class _UAVCrossAttentionReadout(nn.Module):
         super().__init__()
         use_relu = bool(args.use_ReLU)
         self.query = FusionMLP(
-            UAV_STATE_DIM + PUBLIC_STATE_DIM + model_dim,
+            query_input_dim,
             model_dim,
             use_relu,
             layer_N=args.layer_N,
@@ -684,21 +685,27 @@ class _UAVCrossAttentionReadout(nn.Module):
         uavs: torch.Tensor,
         public: torch.Tensor,
         representation: torch.Tensor,
-        tokens: torch.Tensor,
+        memory: torch.Tensor,
+        query_extra: torch.Tensor | None = None,
+        fusion_extra: torch.Tensor | None = None,
     ) -> torch.Tensor:
         public_uav = public.unsqueeze(1).expand(-1, uavs.shape[1], -1)
         representation_uav = representation.unsqueeze(1).expand(
             -1, uavs.shape[1], -1
         )
-        query = self.query(torch.cat([uavs, public_uav, tokens], dim=-1))
-        context = self.attention(query, tokens)
+        query_inputs = [uavs, public_uav]
+        if query_extra is not None:
+            query_inputs.append(query_extra)
+        query = self.query(torch.cat(query_inputs, dim=-1))
+        context = self.attention(query, memory)
+        local_extra = query if fusion_extra is None else fusion_extra
         return self.fusion(
             torch.cat(
                 [
                     uavs,
                     public_uav,
                     representation_uav,
-                    tokens,
+                    local_extra,
                     context,
                 ],
                 dim=-1,
@@ -790,11 +797,12 @@ class MECSetActor(_PopulationActor):
         if self.set_actor_context not in {
             "pooled",
             "relational",
+            "slot_attention",
             "cross_attention",
         }:
             raise ValueError(
                 "mec_set_actor_context must be one of: "
-                "pooled, relational, cross_attention"
+                "pooled, relational, slot_attention, cross_attention"
             )
         if (
             population_encoder_type(args) == "flat_mlp"
@@ -872,11 +880,24 @@ class MECSetActor(_PopulationActor):
                 use_orthogonal=args.use_orthogonal,
                 use_feature_normalization=args.use_feature_normalization,
             )
+        elif self.set_actor_context == "slot_attention":
+            del self.minor_fusion
+            self.minor_cross_attention = _UAVCrossAttentionReadout(
+                args,
+                representation_dim=representation_dim,
+                query_input_dim=UAV_STATE_DIM + PUBLIC_STATE_DIM,
+                model_dim=model_dim,
+                num_heads=num_heads,
+                hidden_size=self.hidden_size,
+            )
         elif self.set_actor_context == "cross_attention":
             del self.minor_fusion
             self.minor_cross_attention = _UAVCrossAttentionReadout(
                 args,
                 representation_dim=representation_dim,
+                query_input_dim=(
+                    UAV_STATE_DIM + PUBLIC_STATE_DIM + model_dim
+                ),
                 model_dim=model_dim,
                 num_heads=num_heads,
                 hidden_size=self.hidden_size,
@@ -923,6 +944,26 @@ class MECSetActor(_PopulationActor):
             return self._features_separate_encoders(obs)
         if self.set_actor_context == "pooled":
             return super()._features(obs)
+        if self.set_actor_context == "slot_attention":
+            team = self._reshape_team(obs)
+            public = team[:, 0, _PUBLIC]
+            uavs = team[:, 1:, _OWN]
+            descriptor = self.population_encoder(uavs)
+            memory = (
+                descriptor
+                if descriptor.ndim == 3
+                else descriptor.unsqueeze(1)
+            )
+            representation = descriptor.reshape(descriptor.shape[0], -1)
+            major = self.major_fusion(
+                torch.cat([public, representation], dim=-1)
+            )
+            minor = self.minor_cross_attention(
+                uavs, public, representation, memory
+            )
+            return torch.cat(
+                [major.unsqueeze(1), minor], dim=1
+            ).reshape(-1, self.hidden_size)
 
         team = self._reshape_team(obs)
         public = team[:, 0, _PUBLIC]
@@ -936,7 +977,12 @@ class MECSetActor(_PopulationActor):
         )
         if self.set_actor_context == "cross_attention":
             minor = self.minor_cross_attention(
-                uavs, public, representation, tokens
+                uavs,
+                public,
+                representation,
+                tokens,
+                query_extra=tokens,
+                fusion_extra=tokens,
             )
             return torch.cat(
                 [major.unsqueeze(1), minor], dim=1
@@ -971,7 +1017,10 @@ class MECSetActor(_PopulationActor):
             torch.cat([public, major_representation], dim=-1)
         )
 
-        if self.set_actor_context in {"relational", "cross_attention"}:
+        if self.set_actor_context == "slot_attention":
+            minor_descriptor = self.minor_population_encoder(uavs)
+            tokens = None
+        elif self.set_actor_context in {"relational", "cross_attention"}:
             minor_descriptor, tokens = (
                 self.minor_population_encoder.forward_with_tokens(uavs)
             )
@@ -981,6 +1030,18 @@ class MECSetActor(_PopulationActor):
         minor_representation = minor_descriptor.reshape(
             minor_descriptor.shape[0], -1
         )
+        if self.set_actor_context == "slot_attention":
+            memory = (
+                minor_descriptor
+                if minor_descriptor.ndim == 3
+                else minor_descriptor.unsqueeze(1)
+            )
+            minor = self.minor_cross_attention(
+                uavs, public, minor_representation, memory
+            )
+            return torch.cat(
+                [major.unsqueeze(1), minor], dim=1
+            ).reshape(-1, self.hidden_size)
         public_uav = public.unsqueeze(1).expand(
             -1, self.num_uavs, -1
         )
@@ -1036,14 +1097,16 @@ class MECRoleHybridActor(_GroupedRoleActor):
         if self.set_actor_context not in {
             "pooled",
             "relational",
+            "slot_attention",
             "cross_attention",
         }:
             raise ValueError(
                 "mec_set_actor_context must be one of: "
-                "pooled, relational, cross_attention"
+                "pooled, relational, slot_attention, cross_attention"
             )
         if (
-            self.set_actor_context in {"relational", "cross_attention"}
+            self.set_actor_context
+            in {"relational", "slot_attention", "cross_attention"}
             and self.minor_architecture != "set"
         ):
             raise ValueError(
@@ -1083,10 +1146,14 @@ class MECRoleHybridActor(_GroupedRoleActor):
             use_orthogonal=args.use_orthogonal,
             use_feature_normalization=args.use_feature_normalization,
         )
-        if self.set_actor_context == "cross_attention":
+        if self.set_actor_context in {"slot_attention", "cross_attention"}:
+            query_input_dim = UAV_STATE_DIM + PUBLIC_STATE_DIM
+            if self.set_actor_context == "cross_attention":
+                query_input_dim += self.set_model_dim
             self.minor_cross_attention = _UAVCrossAttentionReadout(
                 args,
                 representation_dim=minor_dim,
+                query_input_dim=query_input_dim,
                 model_dim=self.set_model_dim,
                 num_heads=int(getattr(args, "mec_set_heads", 4)),
                 hidden_size=self.hidden_size,
@@ -1136,7 +1203,10 @@ class MECRoleHybridActor(_GroupedRoleActor):
             if role == "major"
             else self.minor_population_encoder
         )
-        if (
+        if role == "minor" and self.set_actor_context == "slot_attention":
+            descriptor = encoder(uavs)
+            tokens = None
+        elif (
             role == "minor"
             and self.set_actor_context in {"relational", "cross_attention"}
         ):
@@ -1144,21 +1214,26 @@ class MECRoleHybridActor(_GroupedRoleActor):
         else:
             descriptor = encoder(uavs)
             tokens = None
-        return descriptor.reshape(descriptor.shape[0], -1), tokens
+        memory = (
+            descriptor
+            if descriptor.ndim == 3
+            else descriptor.unsqueeze(1)
+        )
+        return descriptor.reshape(descriptor.shape[0], -1), tokens, memory
 
     def _branch_representation(self, architecture, uavs, role):
         if architecture == "flat":
-            return self._flat_representation(uavs), None
+            return self._flat_representation(uavs), None, None
         return self._set_representation(uavs, role)
 
     def population_representation(self, obs):
         obs = check(obs).to(**self.tpdv)
         team = self._reshape_team(obs)
         uavs = team[:, 1:, _OWN]
-        major_representation, _ = self._branch_representation(
+        major_representation, _, _ = self._branch_representation(
             self.major_architecture, uavs, "major"
         )
-        minor_representation, _ = self._branch_representation(
+        minor_representation, _, _ = self._branch_representation(
             self.minor_architecture, uavs, "minor"
         )
         return torch.cat(
@@ -1170,19 +1245,31 @@ class MECRoleHybridActor(_GroupedRoleActor):
         public = team[:, 0, _PUBLIC]
         uavs = team[:, 1:, _OWN]
 
-        major_representation, _ = self._branch_representation(
+        major_representation, _, _ = self._branch_representation(
             self.major_architecture, uavs, "major"
         )
         major = self.major_fusion(
             torch.cat([public, major_representation], dim=-1)
         )
 
-        minor_representation, tokens = self._branch_representation(
+        minor_representation, tokens, memory = self._branch_representation(
             self.minor_architecture, uavs, "minor"
         )
+        if self.set_actor_context == "slot_attention":
+            minor = self.minor_cross_attention(
+                uavs, public, minor_representation, memory
+            )
+            return torch.cat(
+                [major.unsqueeze(1), minor], dim=1
+            ).reshape(-1, self.hidden_size)
         if self.set_actor_context == "cross_attention":
             minor = self.minor_cross_attention(
-                uavs, public, minor_representation, tokens
+                uavs,
+                public,
+                minor_representation,
+                tokens,
+                query_extra=tokens,
+                fusion_extra=tokens,
             )
             return torch.cat(
                 [major.unsqueeze(1), minor], dim=1
