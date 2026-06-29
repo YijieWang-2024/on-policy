@@ -71,3 +71,29 @@ control auxiliaries.
 
 Control auxiliaries may later be tested as empirical regularizers only after
 the readout architecture gate is clear.
+
+## 6. Critic Contract After the Slot-EqDec Gate
+
+The flat critic is a diagnostic stabilizer, not a final theoretical commitment.
+It isolates the actor/readout question: can an invariant descriptor or invariant
+slots support equivariant UAV control at all?  The latest answer is yes.
+
+The manuscript-level SetRec story still needs an order-insensitive value
+function.  The critic should therefore remain part of the intended algorithmic
+contract:
+
+```text
+V = V(public, E_V({s_1, ..., s_K}))
+```
+
+The current evidence only rules out the naive coupling choices:
+
+- `shared_grad` lets value loss update the actor descriptor and hurts control.
+- `actor_detached` and `separate` Set critics are usable diagnostics, but the
+  current Set critic still lags the flat critic when paired with a Set actor.
+
+The next critic work should repair this gap without abandoning the invariant
+critic goal.  Plausible directions are a stronger invariant critic readout,
+critic-only slots, value normalization / target diagnostics, and delayed or
+two-stage critic fitting.  The key constraint is that critic improvements must
+not corrupt the actor's control-readable descriptor.

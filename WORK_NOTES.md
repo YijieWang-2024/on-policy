@@ -1,5 +1,60 @@
 # Work Notes
 
+## 2026-06-29 - Slot-EqDec recovers the Set actor, critic remains open
+
+The latest work separated two questions that had been entangled:
+
+1. Can an invariant Set descriptor / slot memory support UAV control if the UAV
+   readout is query-conditioned and equivariant?
+2. Can the value function also be estimated from an order-insensitive Set
+   representation without damaging the actor?
+
+The first answer is now positive.  `--mec_set_actor_context slot_attention`
+uses a UAV-local query from `[s_i, public]` and reads only invariant population
+memory.  It is cleaner than token `cross_attention` because it does not rely on
+per-UAV token memory as the main actor interface.
+
+1.5M, 350-slot, validation seed 1000 / held-out seed 100000 results:
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| mean_pool Slot-EqDec + Flat critic, seed 1 | -867.14 | 1.2096M | 2.6655 | 67.4% | 791.7 m | +7.0% |
+| mean_pool Slot-EqDec + Flat critic, seed 2 | -928.45 | 1.1088M | 2.9208 | 64.5% | 863.0 m | +4.5% |
+| mean_pool Slot-EqDec + Flat critic, seed 3 | -860.95 | 1.4112M | 2.5813 | 68.8% | 810.7 m | +16.2% |
+| latent_slots Slot-EqDec + Flat critic, seed 1 | -877.59 | 1.4952M | 2.6018 | 68.0% | 805.8 m | +7.1% |
+| mean_pool Slot-EqDec + Set critic separate, seed 1 | -965.55 | 1.4112M | 2.8969 | 65.0% | 875.4 m | +0.8% |
+| mean_pool Slot-EqDec + Set critic shared_grad, seed 1 | -1068.07 | 1.2096M | 3.1975 | 60.0% | 941.2 m | +16.6% |
+
+Mean-pool Slot-EqDec + Flat critic over seeds 1/2/3 averages cost/slot
+`2.7225`, acceptance `66.9%`, and W1 `821.8 m`.  This is not yet as strong as
+the best Flat-UAV references, but it is a genuine recovery of the Set actor
+path and is no longer a one-seed accident.  The latent-slot seed-1 result shows
+that learned invariant slots can also be control-readable when decoded through
+the local equivariant query.
+
+The critic lesson should not be overstated.  Flat critic is a diagnostic
+stabilizer, not the final SetRec value-function claim.  The paper still wants a
+value estimate such as `V(public, E_V({s_i}))`, because arbitrary UAV row order
+should not change the value.  What the latest results say is narrower:
+
+- `shared_grad` is harmful because value loss can distort the actor descriptor.
+- `separate` Set critic improves over the original Set critic but still lags
+  the Flat critic in this paired Set-actor setting.
+- The invariant critic should be repaired, not abandoned.
+
+Next plan:
+
+1. Run `latent_slots + slot_attention + flat critic` seeds 2 and 3 to check
+   whether the true latent-slot version is stable.
+2. Design an invariant critic repair gate: stronger Set value readout,
+   critic-only slots, delayed critic fitting, or a stop-gradient interface that
+   preserves actor descriptor quality.
+3. Keep manuscript wording away from "low-dimensional broadcast" for now.  The
+   defensible claim is fixed-size, permutation-invariant representation with
+   equivariant local readout under HAP-coordinated execution.
+4. Do not put control auxiliary losses back on the main path until the actor
+   readout and invariant critic contracts are both resolved.
+
 ## 2026-06-28 - Set-UAV cross-attention readout 1.5M diagnostics
 
 Implemented `--mec_set_actor_context cross_attention` for Set actors and the

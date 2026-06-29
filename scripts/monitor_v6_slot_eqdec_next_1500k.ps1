@@ -9,6 +9,7 @@ param(
     [int]$TestEpisodes = 24,
     [int]$TestSeed = 100000,
     [int]$TestSeedStride = 13,
+    [switch]$SkipSharedGrad,
     [string]$ExperimentPrefix = "next1500_slot_eqdec"
 )
 
@@ -135,6 +136,15 @@ $Jobs = @(
         )
     }
 )
+
+if ($SkipSharedGrad) {
+    $Jobs = @(
+        $Jobs |
+            Where-Object {
+                $_.Experiment -notmatch "sharedgrad"
+            }
+    )
+}
 
 function Get-GpuSnapshot {
     try {

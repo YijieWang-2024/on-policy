@@ -769,3 +769,46 @@ question.  The next phase should be a written theory/architecture redesign:
 define exactly what public group representation is claimed, what local decoder
 queries are allowed, and what minimal trainable readout can support that claim
 without importing an ordered Flat teacher.
+
+## 23. 2026-06-29: Slot-EqDec recovers the Set actor path
+
+The latest SetRec gate added `--mec_set_actor_context slot_attention`.  Each
+UAV forms a local query from `[s_i, public]` and attends only to invariant
+population memory.  This recovers the Set actor path without using per-UAV
+token memory as the main interface.
+
+Latest 1.5M held-out results:
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| mean_pool Slot-EqDec + Flat critic, seed 1 | -867.14 | 1.2096M | 2.6655 | 67.4% | 791.7 m | +7.0% |
+| mean_pool Slot-EqDec + Flat critic, seed 2 | -928.45 | 1.1088M | 2.9208 | 64.5% | 863.0 m | +4.5% |
+| mean_pool Slot-EqDec + Flat critic, seed 3 | -860.95 | 1.4112M | 2.5813 | 68.8% | 810.7 m | +16.2% |
+| latent_slots Slot-EqDec + Flat critic, seed 1 | -877.59 | 1.4952M | 2.6018 | 68.0% | 805.8 m | +7.1% |
+| mean_pool Slot-EqDec + Set critic separate, seed 1 | -965.55 | 1.4112M | 2.8969 | 65.0% | 875.4 m | +0.8% |
+| mean_pool Slot-EqDec + Set critic shared_grad, seed 1 | -1068.07 | 1.2096M | 3.1975 | 60.0% | 941.2 m | +16.6% |
+
+Interpretation:
+
+- Slot-EqDec is the first replicated Set actor recovery.  Mean-pool
+  Slot-EqDec + Flat critic averages cost/slot `2.7225` over seeds 1/2/3.
+- The latent-slot seed-1 result shows that learned invariant slots can be
+  control-readable once the UAV readout is query-conditioned.
+- Flat critic is a diagnostic stabilizer, not the final SetRec value-function
+  claim.  The paper still needs an order-insensitive critic
+  `V(public, E_V({s_i}))`.
+- Do not abandon the Set critic.  The current evidence only says that
+  `shared_grad` corrupts the actor descriptor and that the current separate Set
+  critic readout is weaker than Flat critic.  The next phase should repair the
+  invariant critic without letting critic gradients damage actor slots.
+- Avoid claiming low-dimensional broadcast.  The defensible claim is fixed-size
+  permutation-invariant representation plus equivariant local readout under
+  HAP-coordinated execution.
+
+Immediate next work:
+
+1. Run `latent_slots + slot_attention + flat critic` seeds 2/3.
+2. Run an invariant-critic repair gate: critic-only slots / stronger value
+   readout / delayed critic fitting / stop-gradient actor-critic interface.
+3. Update manuscript language around execution mode and descriptor dimensions
+   only after the algorithmic evidence is settled.

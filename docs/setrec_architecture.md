@@ -543,3 +543,54 @@ interface itself: gradient scales, feature statistics, action sensitivity to
 individual UAV atoms, and optimizer/loss coupling across Mean, Flat, mean_pool,
 flat_mlp, and latent_slots. A new algorithmic stage should wait until that
 failure mode is identified.
+
+## 17. Slot-EqDec readout recovers the Set actor path (2026-06-29)
+
+The next gate changed the UAV actor readout rather than adding another
+auxiliary loss.  `--mec_set_actor_context slot_attention` lets each UAV form a
+query from `[s_i, public]` and attend to invariant population memory.  With
+`mean_pool` the memory is a single invariant slot; with `latent_slots` the
+memory is the learned invariant slot set.  This keeps the descriptor invariant
+and the UAV decoder equivariant.
+
+Protocol: v6 HAP-loadbearing, 350-slot episodes, 1.5M environment steps,
+validation seed 1000 over 24 episodes, held-out seed 100000 with stride 13
+over 24 episodes.
+
+| variant | best validation | selected step | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|---:|
+| mean_pool Slot-EqDec + Flat critic, seed 1 | -867.14 | 1.2096M | 2.6655 | 67.4% | 791.7 m | +7.0% |
+| mean_pool Slot-EqDec + Flat critic, seed 2 | -928.45 | 1.1088M | 2.9208 | 64.5% | 863.0 m | +4.5% |
+| mean_pool Slot-EqDec + Flat critic, seed 3 | -860.95 | 1.4112M | 2.5813 | 68.8% | 810.7 m | +16.2% |
+| latent_slots Slot-EqDec + Flat critic, seed 1 | -877.59 | 1.4952M | 2.6018 | 68.0% | 805.8 m | +7.1% |
+| mean_pool Slot-EqDec + Set critic separate, seed 1 | -965.55 | 1.4112M | 2.8969 | 65.0% | 875.4 m | +0.8% |
+| mean_pool Slot-EqDec + Set critic shared_grad, seed 1 | -1068.07 | 1.2096M | 3.1975 | 60.0% | 941.2 m | +16.6% |
+
+For the three mean_pool Slot-EqDec + Flat critic seeds, held-out cost/slot is
+`2.7225` on average, with average acceptance `66.9%` and average W1 `821.8 m`.
+This is the first Set actor result that is both substantially better than the
+pooled / relational / cross-attention Set-UAV readout gates and replicated
+across multiple seeds.  The latent-slot seed-1 result is especially important:
+learned invariant slots are now control-readable when paired with the local
+query decoder.
+
+The critic interpretation must be careful.  The Flat critic is not the final
+SetRec claim; it is a stabilizing diagnostic that isolates whether the actor
+descriptor/readout can work.  The theory-facing algorithm still needs an
+order-insensitive value function, because a value estimate should not depend on
+the arbitrary UAV row order.  The current negative evidence is narrower:
+naive `shared_grad` critic coupling hurts, and the current separate Set critic
+is still weaker than the Flat critic when paired with a Set actor.  This does
+not kill the invariant critic goal; it says the critic must be repaired without
+letting critic gradients corrupt the actor's control-readable descriptor.
+
+Current working conclusion:
+
+- The next manuscript algorithm should be based on invariant population slots
+  plus an equivariant local readout, not pooled descriptor concatenation.
+- Do not claim low-dimensional broadcast yet; the present claim is fixed-size,
+  permutation-invariant / label-free representation.
+- Do not abandon the Set critic objective.  Treat Flat critic runs as
+  actor-readout evidence, then run targeted invariant-critic repair experiments.
+- Do not revive control auxiliaries as the main story until the readout and
+  critic contracts are aligned.
