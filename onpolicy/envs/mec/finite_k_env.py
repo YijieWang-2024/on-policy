@@ -86,7 +86,9 @@ class FiniteKHAPUAVMECEnv:
         swarm centroid (= hub) uniformly in a central frac box, then lays the K UAVs
         on a square grid spanning a fixed side around that centroid. This removes the
         fixed-corner directional bias (the swarm no longer learns a constant offset
-        vector). Otherwise the static yaml positions are used (back-compatible).
+        vector). If env.uav.initial_deploy.random_uav_permutation is set, the
+        homogeneous UAV rows are randomly assigned to those grid points at reset.
+        Otherwise the static yaml positions are used (back-compatible).
         """
         dep = self.cfg["env"]["uav"].get("initial_deploy")
         if not dep or not dep.get("random_centroid"):
@@ -101,6 +103,8 @@ class FiniteKHAPUAVMECEnv:
         offs = (np.arange(g) / (g - 1) - 0.5) * side if g > 1 else np.array([0.0])
         pts = [[cx + offs[i], cy + offs[j]] for i in range(g) for j in range(g)]
         uav = self._clip_xy(np.array(pts[: self.k], dtype=float))
+        if dep.get("random_uav_permutation"):
+            uav = uav[self.rng.permutation(self.k)]
         hub = self._clip_xy(np.array([cx, cy], dtype=float))
         return hub, uav
 
