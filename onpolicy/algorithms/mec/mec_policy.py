@@ -751,6 +751,46 @@ class MECFlatActor(_PopulationActor):
         return uavs.reshape(uavs.shape[0], -1)
 
 
+class MECFlatDescriptorActor(_PopulationActor):
+    """Order-sensitive flat descriptor bottleneck diagnostic actor."""
+
+    def __init__(
+        self, args, obs_space, action_space, num_agents, device
+    ):
+        representation_dim = int(
+            getattr(
+                args,
+                "mec_flat_descriptor_dim",
+                population_representation_dim(args),
+            )
+        )
+        if representation_dim <= 0:
+            raise ValueError("mec_flat_descriptor_dim must be positive")
+        super().__init__(
+            args,
+            obs_space,
+            action_space,
+            num_agents,
+            representation_dim,
+            device,
+        )
+        self.flat_dim = UAV_STATE_DIM * self.num_uavs
+        self.descriptor_encoder = FusionMLP(
+            self.flat_dim,
+            representation_dim,
+            bool(args.use_ReLU),
+            layer_N=args.layer_N,
+            use_orthogonal=args.use_orthogonal,
+            use_feature_normalization=args.use_feature_normalization,
+        )
+        self.to(device)
+
+    def _representation(self, uavs):
+        return self.descriptor_encoder(
+            uavs.reshape(uavs.shape[0], self.flat_dim)
+        )
+
+
 class MECSortFlatActor(_PopulationActor):
     """Order-invariant full-state diagnostic using sorted UAV atoms."""
 
@@ -1495,7 +1535,11 @@ class MECPolicy(R_MAPPOPolicy):
             getattr(args, "mec_critic_arch", "same")
         ).lower()
         if requested_critic_architecture == "same":
-            self.critic_architecture = self.actor_architecture
+            self.critic_architecture = (
+                "flat"
+                if self.actor_architecture == "flat_descriptor"
+                else self.actor_architecture
+            )
         else:
             self.critic_architecture = requested_critic_architecture
         self.architecture = self.actor_architecture
@@ -1587,6 +1631,14 @@ class MECPolicy(R_MAPPOPolicy):
                 self.num_agents,
                 device,
             )
+        elif self.actor_architecture == "flat_descriptor":
+            self.actor = MECFlatDescriptorActor(
+                args,
+                obs_space,
+                act_space,
+                self.num_agents,
+                device,
+            )
         elif self.actor_architecture == "sort_flat":
             self.actor = MECSortFlatActor(
                 args,
@@ -1626,8 +1678,8 @@ class MECPolicy(R_MAPPOPolicy):
         else:
             raise ValueError(
                 "mec_policy_arch must be one of: "
-                "legacy_mean, mean, flat, sort_flat, set, "
-                "set_hap_flat_uav, flat_hap_set_uav"
+                "legacy_mean, mean, flat, flat_descriptor, sort_flat, "
+                "set, set_hap_flat_uav, flat_hap_set_uav"
             )
 
         population_encoder = None

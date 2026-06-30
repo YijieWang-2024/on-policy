@@ -64,6 +64,7 @@ def _args(architecture="set"):
         mec_set_num_seeds=3,
         mec_set_element_blocks=2,
         mec_set_latent_blocks=1,
+        mec_flat_descriptor_dim=32 * 3,
         mec_set_critic_encoder="actor_detached",
         mec_set_actor_encoder="shared",
         mec_set_actor_context="pooled",
@@ -199,6 +200,42 @@ def test_flat_representation_is_order_sensitive():
         representation_perm = policy.actor.population_representation(
             permuted.reshape(-1, OBS_DIM)
         )
+    assert not torch.allclose(representation, representation_perm)
+
+
+def test_flat_descriptor_actor_uses_bottleneck_and_flat_critic():
+    args = _args("flat_descriptor")
+    policy = MECPolicy(
+        args,
+        *_spaces(),
+        torch.device("cpu"),
+        num_agents=N,
+    )
+    assert policy.actor_architecture == "flat_descriptor"
+    assert policy.critic_architecture == "flat"
+    assert policy.actor.major_fusion.input_dim == (
+        PUBLIC_STATE_DIM + args.mec_flat_descriptor_dim
+    )
+    assert policy.actor.minor_fusion.input_dim == (
+        UAV_STATE_DIM + PUBLIC_STATE_DIM + args.mec_flat_descriptor_dim
+    )
+    assert policy.critic.readout.input_dim == (
+        PUBLIC_STATE_DIM + UAV_STATE_DIM * K
+    )
+
+    teams = _team_obs(seed=37)
+    _, permuted = _permuted(teams)
+    with torch.no_grad():
+        representation = policy.actor.population_representation(
+            teams.reshape(-1, OBS_DIM)
+        )
+        representation_perm = policy.actor.population_representation(
+            permuted.reshape(-1, OBS_DIM)
+        )
+    assert representation.shape == (
+        N_ENV,
+        args.mec_flat_descriptor_dim,
+    )
     assert not torch.allclose(representation, representation_perm)
 
 

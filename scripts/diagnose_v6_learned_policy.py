@@ -28,6 +28,16 @@ def parse_args():
     parser.add_argument("--model_dir", required=True)
     parser.add_argument("--episodes", type=int, default=24)
     parser.add_argument("--eval_seed", type=int, default=1000)
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="sample actions instead of using the deterministic policy mean",
+    )
+    parser.add_argument(
+        "--projection_only",
+        action="store_true",
+        help="only run the policy rollout needed for action projection stats",
+    )
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -74,7 +84,19 @@ def quartile_delta(x, y):
     return float(np.mean(y[x >= hi]) - np.mean(y[x <= lo]))
 
 
-def rollout(env, policy, args, seed: int, mode: str):
+def _projection_stats(values):
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        return {}
+    return {key: float(fn(arr)) for key, fn in {
+        "mean": np.mean,
+        "p50": np.median,
+        "p95": lambda x: np.quantile(x, 0.95),
+        "max": np.max,
+    }.items()}
+
+
+def rollout(env, policy, args, seed: int, mode: str, stochastic: bool):
     raw = env.env
     obs_dict, _ = raw.reset(seed=seed)
     obs_n = env._agent_obs(obs_dict)
@@ -106,6 +128,13 @@ def rollout(env, policy, args, seed: int, mode: str):
         "hap_speed": [],
         "hap_toward_centroid_speed": [],
         "hub_to_centroid": [],
+        "hap_raw_norm": [],
+        "uav_raw_norm": [],
+        "hap_component_abs_max": [],
+        "uav_component_abs_max": [],
+        "hap_projection_delta": [],
+        "uav_projection_delta": [],
+        "beta_clip_delta": [],
     }
 
     for _ in range(horizon):
@@ -120,9 +149,12 @@ def rollout(env, policy, args, seed: int, mode: str):
 
         with torch.no_grad():
             action, rnn = policy.act(
-                obs_n, rnn, masks, deterministic=True
+                obs_n, rnn, masks, deterministic=not stochastic
             )
         action = action.detach().cpu().numpy().reshape(n_agents, ACT_DIM)
+        raw_hap_unit = action[0, :2].astype(float)
+        raw_uav_unit = action[1:, :2].astype(float)
+        raw_beta = action[1:, 2].astype(float)
         hap_v = action[0, :2] * env.v_h_max
         uav_v = action[1:, :2] * env.v_u_max
         beta = np.clip(action[1:, 2], 0.0, 1.0)
@@ -165,6 +197,32 @@ def rollout(env, policy, args, seed: int, mode: str):
                 "beta": beta,
             }
         )
+        projected = info["projected_action"]
+        executed_hap_unit = (
+            np.asarray(projected["hap_velocity_mps"], float)
+            / max(env.v_h_max, 1e-9)
+        )
+        executed_uav_unit = (
+            np.asarray(projected["uav_velocity_mps"], float)
+            / max(env.v_u_max, 1e-9)
+        )
+        traces["hap_raw_norm"].append(float(np.linalg.norm(raw_hap_unit)))
+        traces["uav_raw_norm"].extend(
+            np.linalg.norm(raw_uav_unit, axis=1).tolist()
+        )
+        traces["hap_component_abs_max"].append(
+            float(np.max(np.abs(raw_hap_unit)))
+        )
+        traces["uav_component_abs_max"].extend(
+            np.max(np.abs(raw_uav_unit), axis=1).tolist()
+        )
+        traces["hap_projection_delta"].append(
+            float(np.linalg.norm(raw_hap_unit - executed_hap_unit))
+        )
+        traces["uav_projection_delta"].extend(
+            np.linalg.norm(raw_uav_unit - executed_uav_unit, axis=1).tolist()
+        )
+        traces["beta_clip_delta"].extend(np.abs(raw_beta - beta).tolist())
         obs_n = env._agent_obs(obs_dict)
         team = env._agent_infos(info, reward)[0]
         totals["cost"] += float(team["training_cost"])
@@ -190,7 +248,11 @@ def rollout(env, policy, args, seed: int, mode: str):
 def main():
     cli = parse_args()
     env, policy, args = load(cli.model_dir)
-    modes = ("policy", "freeze_hap", "hover_uav", "beta_mean")
+    modes = (
+        ("policy",)
+        if cli.projection_only
+        else ("policy", "freeze_hap", "hover_uav", "beta_mean")
+    )
     results = {}
     baseline_traces = {key: [] for key in (
         "beta",
@@ -201,13 +263,25 @@ def main():
         "hap_speed",
         "hap_toward_centroid_speed",
         "hub_to_centroid",
+        "hap_raw_norm",
+        "uav_raw_norm",
+        "hap_component_abs_max",
+        "uav_component_abs_max",
+        "hap_projection_delta",
+        "uav_projection_delta",
+        "beta_clip_delta",
     )}
 
     for mode in modes:
         episodes = []
         for i in range(cli.episodes):
             metrics, traces = rollout(
-                env, policy, args, cli.eval_seed + 13 * i, mode
+                env,
+                policy,
+                args,
+                cli.eval_seed + 13 * i,
+                mode,
+                cli.stochastic,
             )
             episodes.append(metrics)
             if mode == "policy":
@@ -255,12 +329,56 @@ def main():
             policy.actor.minor_logstd.detach().cpu().numpy()
         ).tolist(),
     }
+    projection_diagnostics = {
+        "hap_norm_gt_1_rate": float(
+            np.mean(np.asarray(baseline_traces["hap_raw_norm"]) > 1.0)
+        ),
+        "uav_norm_gt_1_rate": float(
+            np.mean(np.asarray(baseline_traces["uav_raw_norm"]) > 1.0)
+        ),
+        "hap_component_abs_gt_1_rate": float(
+            np.mean(
+                np.asarray(baseline_traces["hap_component_abs_max"]) > 1.0
+            )
+        ),
+        "uav_component_abs_gt_1_rate": float(
+            np.mean(
+                np.asarray(baseline_traces["uav_component_abs_max"]) > 1.0
+            )
+        ),
+        "hap_projection_nonzero_rate": float(
+            np.mean(
+                np.asarray(baseline_traces["hap_projection_delta"]) > 1e-6
+            )
+        ),
+        "uav_projection_nonzero_rate": float(
+            np.mean(
+                np.asarray(baseline_traces["uav_projection_delta"]) > 1e-6
+            )
+        ),
+        "beta_clip_nonzero_rate": float(
+            np.mean(np.asarray(baseline_traces["beta_clip_delta"]) > 1e-6)
+        ),
+        "hap_raw_norm": _projection_stats(baseline_traces["hap_raw_norm"]),
+        "uav_raw_norm": _projection_stats(baseline_traces["uav_raw_norm"]),
+        "hap_projection_delta": _projection_stats(
+            baseline_traces["hap_projection_delta"]
+        ),
+        "uav_projection_delta": _projection_stats(
+            baseline_traces["uav_projection_delta"]
+        ),
+        "beta_clip_delta": _projection_stats(
+            baseline_traces["beta_clip_delta"]
+        ),
+    }
     output = {
         "model_dir": cli.model_dir,
         "episodes": cli.episodes,
         "eval_seed": cli.eval_seed,
+        "action_mode": "stochastic" if cli.stochastic else "deterministic",
         "modes": results,
         "action_diagnostics": action_diagnostics,
+        "projection_diagnostics": projection_diagnostics,
     }
     Path(cli.output).write_text(
         json.dumps(output, indent=2), encoding="utf-8"

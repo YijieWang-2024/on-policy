@@ -254,6 +254,7 @@ def get_config():
             "legacy_mean",
             "mean",
             "flat",
+            "flat_descriptor",
             "sort_flat",
             "set",
             "set_hap_flat_uav",
@@ -261,9 +262,9 @@ def get_config():
         ],
         help=(
             "MEC actor population representation: aligned mean, ordered "
-            "flat, lexicographically sorted flat, invariant set, or "
-            "role-isolated Set/Flat hybrids; legacy_mean is for "
-            "historical checkpoints"
+            "flat, ordered flat descriptor bottleneck, lexicographically "
+            "sorted flat, invariant set, or role-isolated Set/Flat "
+            "hybrids; legacy_mean is for historical checkpoints"
         ),
     )
     parser.add_argument(
@@ -282,6 +283,15 @@ def get_config():
         type=int,
         default=64,
         help="token/latent width of the MEC population encoder",
+    )
+    parser.add_argument(
+        "--mec_flat_descriptor_dim",
+        type=int,
+        default=256,
+        help=(
+            "descriptor width for mec_policy_arch=flat_descriptor; "
+            "default matches latent_slots 4x64 flattened slots"
+        ),
     )
     parser.add_argument(
         "--mec_set_encoder_type",
