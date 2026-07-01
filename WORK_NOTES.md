@@ -1,5 +1,85 @@
 # Work Notes
 
+## 2026-06-30 - Reset-permutation isolation and flat-descriptor held-out
+
+The reset-permutation round is now complete for the main actor baselines and
+for the flat-descriptor bottleneck diagnostic.  The scenario is
+`v6_hap_loadbearing` with `initial_deploy.random_uav_permutation: true`,
+350-slot episodes, 1.5M environment steps, validation seed 1000, and held-out
+seed 100000 with stride 13 over 24 episodes.
+
+The new B diagnostic is:
+
+```text
+mec_policy_arch=flat_descriptor
+actor: flat ordered UAV state -> FusionMLP descriptor -> pooled PopulationActor readout
+critic: flat ordered centralized critic
+```
+
+This actor is still order-sensitive and keeps the Flat critic, so it isolates
+whether the descriptor/readout bottleneck itself is harmful.
+
+| variant | held-out cost/slot mean | accept mean | W1 mean | HAP-freeze mean | validation cost mean |
+|---|---:|---:|---:|---:|---:|
+| Flat actor + Flat critic | 2.7326 | 66.55% | 800.6 m | +12.9% | 2.5979 |
+| Latent Slot-EqDec actor + Flat critic | 3.1458 | 60.54% | 972.8 m | +8.1% | 3.0125 |
+| Latent Slot-EqDec actor + invariant Set critic | 4.3119 | 44.87% | 1145.4 m | -0.7% | 4.0225 |
+| Flat descriptor actor + Flat critic | 4.4281 | 42.24% | 1212.0 m | +0.3% | 4.1802 |
+
+Flat descriptor actor + Flat critic held-out rows:
+
+| seed | selected step | validation cost | held-out cost/slot | accept | W1 | HAP-freeze |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 806400 | 4.1728 | 4.3981 | 42.4% | 1219.6 m | -0.4% |
+| 2 | 1495200 | 4.2223 | 4.3427 | 43.7% | 1178.2 m | +2.1% |
+| 3 | 302400 | 4.1454 | 4.5433 | 40.6% | 1238.3 m | -0.7% |
+
+Artifacts:
+
+```text
+eval_outputs/resetperm_flat_descriptor_1500k/resetperm1500_flat_descriptor.summary.json
+eval_outputs/resetperm_flat_descriptor_1500k/resetperm1500_flat_descriptor_flatcrit_seed{1,2,3}.json
+training_logs/resetperm1500_flat_descriptor_flatcrit_seed{1,2,3}.heldout.log
+```
+
+Interpretation:
+
+- Reset permutation was the right fairness change.  It removes the fixed
+  initialization-row shortcut, but it does not make Flat actor + Flat critic
+  collapse; Flat remains the strongest reset-permutation reference.
+- Latent Slot-EqDec + Flat critic is stable and much better than the old pooled
+  descriptor path, but under reset permutation it still trails Flat by about
+  `0.41` cost/slot and about `172 m` W1.
+- The invariant Set critic is a real bottleneck.  `latent Slot-EqDec + Set
+  critic` is much worse than the same actor with Flat critic.
+- The B diagnostic is the strongest evidence that the main actor failure is
+  not merely permutation invariance, Set encoder complexity, or Set critic
+  weakness.  A learned global descriptor that is broadcast to each UAV readout
+  breaks control even when the descriptor is produced from the ordered Flat
+  state and the critic is Flat.
+- The historical role-isolation results fit the same story: HAP-side Set is
+  acceptable when UAVs keep Flat information, while UAV-side pooled Set readout
+  fails.  Query-conditioned/equivariant UAV readout is the useful repair.
+- W1 is not just an aesthetic metric.  Good policies stay around `700-850 m`,
+  while failed pooled/descriptor policies are around `1100-1250 m`.  However,
+  reconstruction loss should not be reintroduced as a main actor-side bottleneck
+  until the readout and critic contracts are stable.
+
+Current research decision:
+
+- Keep reset-level UAV permutation as the default experimental setting.
+- Stop expanding pooled/broadcast descriptor actor variants.
+- Keep Slot-EqDec as the actor-side theory candidate: invariant population
+  slots plus equivariant local UAV decoder.
+- Keep Flat critic as a diagnostic stabilizer only, not as the final SetRec
+  claim.
+- Repair the invariant critic as a separate subproblem: critic-only slots,
+  stronger invariant value readout, delayed critic fitting, and no shared
+  gradient path back into the actor descriptor.
+- If W1 reconstruction is used next, prefer critic/representation diagnostics
+  or a carefully weighted critic-side auxiliary.  Do not make it the main actor
+  representation bottleneck again.
+
 ## 2026-06-29 - Slot-EqDec recovers the Set actor, critic remains open
 
 The latest work separated two questions that had been entangled:
@@ -1742,3 +1822,81 @@ observations, and truncation-versus-termination bootstrapping.
 - `upstream` remains the original `marlbenchmark/on-policy` repository.
 - MPE environments should report external time limits as truncation and reserve
   termination for true task-ending conditions.
+
+## 2026-07-01 - Reset-Permutation Mean Baseline and Critic Isolation
+
+Protocol: `v6_hap_loadbearing`, 350-slot episodes, 1.5M environment steps,
+validation seed 1000 over 24 episodes, held-out seed 100000 with stride 13 over
+24 episodes, and reset-time UAV-row permutation.
+
+### Main reset-permutation results
+
+| variant | seeds | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|
+| Mean actor + Mean critic | 1/2/3 | 2.0991 | 75.07% | 684.6 m | +59.2% |
+| Flat actor + Flat critic | 1/2/3 | 2.7326 | 66.55% | 800.6 m | +12.9% |
+| Latent Slot-EqDec actor + Flat critic | 1/2/3 | 3.1458 | 60.54% | 972.8 m | +8.1% |
+| Latent Slot-EqDec actor + Set critic | 1/2/3 | 4.3119 | 44.87% | 1145.4 m | -0.7% |
+| Flat descriptor actor + Flat critic, dim 256 | 1/2/3 | 4.4281 | 42.24% | 1212.0 m | +0.3% |
+
+The fair Mean descriptor baseline is now the strongest reset-permutation
+result.  It beats Flat actor + Flat critic by `0.6335` cost/slot and improves
+acceptance by `8.52` percentage points.  This indicates that the reset
+permutation removes a useful fixed-row shortcut from Flat, while the mean
+descriptor supplies a robust first-moment inductive bias that is highly matched
+to the current scenario.
+
+### Flat-descriptor dimension sweep
+
+All entries below use seed 1 and Flat critic:
+
+| descriptor dim | held-out cost/slot | accept | W1 | HAP-freeze |
+|---:|---:|---:|---:|---:|
+| 16 | 4.2389 | 45.48% | 1165.0 m | -1.0% |
+| 32 | 4.1678 | 46.91% | 1134.9 m | -2.9% |
+| 64 | 4.5236 | 40.72% | 1218.0 m | -0.8% |
+| 128 | 4.6397 | 39.18% | 1243.1 m | -1.0% |
+| 256 | 4.3981 | 42.40% | 1219.6 m | -0.4% |
+
+Lowering the descriptor dimension does not rescue the learned bottleneck.
+Dim 32 is the least bad, but it is still far behind Mean, Flat, and
+Slot-EqDec.  The likely issue is not descriptor width.  It is that PPO does not
+reliably learn a control-readable broadcast descriptor through this weak
+end-to-end signal.
+
+### Critic isolation with a strong Mean actor
+
+| variant | seed | held-out cost/slot | accept | W1 | HAP-freeze |
+|---|---:|---:|---:|---:|---:|
+| Mean actor + Mean critic | 1 | 2.1286 | 74.63% | 700.9 m | +59.1% |
+| Mean actor + Flat critic | 1 | 2.5767 | 67.38% | 828.9 m | +19.5% |
+| Mean actor + separate Set critic | 1 | 3.2847 | 59.74% | 872.4 m | +8.9% |
+
+This isolates two facts.  First, the Set critic is still a real bottleneck when
+paired with a non-Set Mean actor, even with a separate critic encoder.  Second,
+Mean + Flat critic also lags Mean + Mean, so the Mean baseline's strength is
+not purely actor-side; the simple mean value representation is also very well
+matched to this environment.
+
+### Paper-facing interpretation
+
+The current environment appears to be largely first-moment sufficient.  A
+simple permutation-invariant mean descriptor plus local UAV state explains most
+of the control problem.  Learned descriptors and slots are not yet justified as
+replacements for mean in this scenario.
+
+The manuscript should therefore pivot from "learned descriptor replaces mean"
+to a more defensible question: can an invariant learned descriptor provide
+residual higher-order empirical-measure information beyond the strong mean
+baseline, especially in stress settings where a first moment is insufficient?
+
+Immediate next experiments:
+
+1. Implement a mean-residual Slot-EqDec actor that always receives `mean_uav`
+   and adds a local-query slot context as residual information.
+2. Run `mean_residual_slot + Mean critic`, seed 1 full 1.5M, then compare to
+   Mean + Mean seed 1 and Mean + Flat critic seed 1.
+3. Add a post-hoc representation probe for true set reconstruction W1, separate
+   from the demand-matching W1 currently reported by evaluation.
+4. Design a mean-insufficient stress scenario, such as split/multi-hotspot
+   demand, where higher-order fleet geometry should matter.

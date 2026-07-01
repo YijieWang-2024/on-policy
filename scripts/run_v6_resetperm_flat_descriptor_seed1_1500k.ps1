@@ -144,7 +144,8 @@ Write-Output "[$(Get-Date -Format o)] started training $Experiment pid=$($Proces
 $Process.WaitForExit()
 $Process.Refresh()
 
-if ($Process.ExitCode -ne 0) {
+$TrainExitCode = $Process.ExitCode
+if ($null -ne $TrainExitCode -and $TrainExitCode -ne 0) {
     throw "Training failed for $Experiment with exit code $($Process.ExitCode)"
 }
 if ((Test-Path -LiteralPath $TrainErr) -and
@@ -191,7 +192,8 @@ Write-Output "[$(Get-Date -Format o)] started held-out eval $Experiment pid=$($E
 $EvalProcess.WaitForExit()
 $EvalProcess.Refresh()
 
-if ($EvalProcess.ExitCode -ne 0) {
+$EvalExitCode = $EvalProcess.ExitCode
+if ($null -ne $EvalExitCode -and $EvalExitCode -ne 0) {
     throw "Held-out eval failed for $Experiment with exit code $($EvalProcess.ExitCode)"
 }
 if ((Test-Path -LiteralPath $EvalErr) -and
