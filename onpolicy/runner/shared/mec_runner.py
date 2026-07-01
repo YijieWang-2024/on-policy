@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import numpy as np
 
+from onpolicy.envs.mec.observation import repeat_team_state
 from onpolicy.runner.shared.mpe_runner import MPERunner
 
 
 class MECRunner(MPERunner):
+    def _share_obs(self, obs):
+        if not self.use_centralized_V:
+            return obs
+        return repeat_team_state(obs)
+
     def _actions_to_env(self, actions, envs):
         action_space = envs.action_space[0]
         if action_space.__class__.__name__ == "Box":
@@ -22,6 +28,15 @@ class MECRunner(MPERunner):
 
     def log_env(self, env_infos, total_num_steps):
         """Also surface team MEC metrics (carried on the major agent's info slot)."""
+        is_training_snapshot = any(
+            key.startswith("agent") for key in env_infos
+        )
+        if not is_training_snapshot:
+            # eval() currently supplies only its aggregate reward. Reusing
+            # _last_infos here would silently print the most recent training
+            # rollout as though it came from validation.
+            return super().log_env(env_infos, total_num_steps)
+
         keys = (
             "training_cost", "src_cost", "ovf_cost", "queue_cost",
             "energy_cost", "accepted", "offloaded", "overflow", "U_src",

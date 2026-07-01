@@ -246,8 +246,177 @@ def get_config():
                         help="floor for the annealed entropy coefficient (default: 0.0)")
     parser.add_argument("--mec_logstd_init", type=float, default=-1.9,
                         help="initial log-std of the MEC actor's Gaussian velocity heads (sigma=exp); -1.9 => sigma~0.15 to avoid max-speed careening")
+    parser.add_argument(
+        "--mec_policy_arch",
+        type=str,
+        default="mean",
+        choices=[
+            "legacy_mean",
+            "mean",
+            "flat",
+            "flat_descriptor",
+            "sort_flat",
+            "set",
+            "set_hap_flat_uav",
+            "flat_hap_set_uav",
+        ],
+        help=(
+            "MEC actor population representation: aligned mean, ordered "
+            "flat, ordered flat descriptor bottleneck, lexicographically "
+            "sorted flat, invariant set, or role-isolated Set/Flat "
+            "hybrids; legacy_mean is for historical checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--mec_critic_arch",
+        type=str,
+        default="same",
+        choices=["same", "mean", "flat", "sort_flat", "set"],
+        help=(
+            "MEC critic population representation diagnostic. 'same' uses "
+            "mec_policy_arch; other values decouple actor and critic "
+            "representations for ablations such as Set actor + Flat critic."
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_dim",
+        type=int,
+        default=64,
+        help="token/latent width of the MEC population encoder",
+    )
+    parser.add_argument(
+        "--mec_flat_descriptor_dim",
+        type=int,
+        default=256,
+        help=(
+            "descriptor width for mec_policy_arch=flat_descriptor; "
+            "default matches latent_slots 4x64 flattened slots"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_encoder_type",
+        type=str,
+        default="latent_slots",
+        choices=["latent_slots", "mean_pool", "flat_mlp"],
+        help=(
+            "Set population encoder: latent_slots uses the default "
+            "learned seed pooling, while mean_pool uses self-attention "
+            "tokens followed by invariant mean pooling, and flat_mlp "
+            "uses an ordered flattened UAV state MLP diagnostic"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_heads",
+        type=int,
+        default=4,
+        help="attention heads in the MEC population encoder/readouts",
+    )
+    parser.add_argument(
+        "--mec_set_num_seeds",
+        type=int,
+        default=4,
+        help="number of invariant population latent slots",
+    )
+    parser.add_argument(
+        "--mec_set_element_blocks",
+        type=int,
+        default=2,
+        help="self-attention blocks before population pooling",
+    )
+    parser.add_argument(
+        "--mec_set_latent_blocks",
+        type=int,
+        default=1,
+        help="self-attention blocks among pooled population slots",
+    )
+    parser.add_argument(
+        "--mec_set_critic_encoder",
+        type=str,
+        default="actor_detached",
+        choices=["actor_detached", "separate", "shared_grad"],
+        help=(
+            "Set critic population encoder mode: actor_detached reuses "
+            "the actor encoder under no_grad, while separate trains an "
+            "independent critic encoder with the value loss, and "
+            "shared_grad lets the critic value loss update the shared "
+            "actor encoder as a diagnostic"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_actor_encoder",
+        type=str,
+        default="shared",
+        choices=["shared", "separate"],
+        help=(
+            "Set actor population encoder ownership: shared uses one "
+            "encoder for HAP and UAV actor branches, while separate uses "
+            "independent HAP/UAV actor encoders as a diagnostic for "
+            "role-gradient interference"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_actor_context",
+        type=str,
+        default="pooled",
+        choices=[
+            "pooled",
+            "relational",
+            "slot_attention",
+            "cross_attention",
+        ],
+        help=(
+            "Set actor UAV context: pooled uses only the invariant "
+            "population descriptor, while relational also gives each UAV "
+            "its equivariant self-attention token; slot_attention lets each "
+            "UAV decode from invariant latent slots only; cross_attention "
+            "lets each UAV decode from the equivariant token memory while "
+            "still conditioning on the invariant descriptor"
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_reconstruction_coef",
+        type=float,
+        default=0.0,
+        help=(
+            "Auxiliary coefficient for Set population reconstruction. "
+            "When positive, the actor optimizer adds a Chamfer-style "
+            "unordered UAV atom reconstruction loss to shape the actor "
+            "population encoder."
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_pretrained_actor",
+        type=str,
+        default=None,
+        help=(
+            "Path to an actor.pt produced by MEC Set reconstruction "
+            "pretraining. Only population_encoder and, when present, "
+            "reconstruction_decoder weights are loaded; critic, readouts, "
+            "optimizers, and ValueNorm are not restored."
+        ),
+    )
+    parser.add_argument(
+        "--mec_set_freeze_pretrained_encoder_updates",
+        type=int,
+        default=0,
+        help=(
+            "For Set policies, freeze the actor population encoder for "
+            "this many PPO updates after loading/initialization. This "
+            "supports a staged pretrain -> readout warm-up -> finetune "
+            "training schedule."
+        ),
+    )
     parser.add_argument("--target_kl", type=float, default=None,
                         help="optional approximate-KL threshold for early stopping PPO epochs")
+    parser.add_argument(
+        "--mec_rolewise_loss",
+        action="store_true",
+        default=False,
+        help=(
+            "for MEC, normalize advantages separately by role and combine "
+            "major/minor PPO policy and entropy losses with equal weight"
+        ),
+    )
     parser.add_argument("--value_loss_coef", type=float,
                         default=1, help='value loss coefficient (default: 0.5)')
     parser.add_argument("--use_max_grad_norm",
@@ -272,6 +441,12 @@ def get_config():
                         default=False, help='use a linear schedule on the learning rate')
     # save parameters
     parser.add_argument("--save_interval", type=int, default=1, help="time duration between contiunous twice models saving.")
+    parser.add_argument(
+        "--save_step_checkpoints",
+        action="store_true",
+        default=False,
+        help="also retain numbered step checkpoints instead of latest-only models",
+    )
 
     # log parameters
     parser.add_argument("--log_interval", type=int, default=5, help="time duration between contiunous twice log printing.")
@@ -280,6 +455,33 @@ def get_config():
     parser.add_argument("--use_eval", action='store_true', default=False, help="by default, do not start evaluation. If set`, start evaluation alongside with training.")
     parser.add_argument("--eval_interval", type=int, default=25, help="time duration between contiunous twice evaluation progress.")
     parser.add_argument("--eval_episodes", type=int, default=32, help="number of episodes of a single evaluation.")
+    parser.add_argument(
+        "--eval_seed",
+        type=int,
+        default=1000,
+        help=(
+            "fixed base seed for deterministic validation and "
+            "best-checkpoint selection; do not reuse it for final reporting"
+        ),
+    )
+    parser.add_argument(
+        "--test_seed",
+        type=int,
+        default=100000,
+        help="held-out test base seed used only after checkpoint selection",
+    )
+    parser.add_argument(
+        "--test_episodes",
+        type=int,
+        default=24,
+        help="number of held-out episodes for final MEC evaluation",
+    )
+    parser.add_argument(
+        "--test_seed_stride",
+        type=int,
+        default=13,
+        help="stride between held-out MEC test episode seeds",
+    )
 
     # render parameters
     parser.add_argument("--save_gifs", action='store_true', default=False, help="by default, do not save render video. If set, save video.")

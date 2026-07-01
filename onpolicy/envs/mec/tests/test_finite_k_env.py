@@ -60,6 +60,11 @@ def _random_actions(rng: np.random.Generator, k: int):
     }
 
 
+def _sorted_rows(rows: np.ndarray) -> np.ndarray:
+    order = np.lexsort((rows[:, 1], rows[:, 0]))
+    return rows[order]
+
+
 # ------------------------------------------------------------ parity test
 
 def test_full_step_parity_with_origin():
@@ -275,6 +280,33 @@ def test_demand_random_walk():
     center, vel = env1._advance_demand(env1.state)
     np.testing.assert_allclose(center, [2 * 6000.0 - 6015.0, 3000.0], atol=1e-9)
     np.testing.assert_allclose(vel, [-25.0, 0.0], atol=1e-12)
+
+
+def test_random_reset_permutation_preserves_initial_physical_set():
+    cfg_perm = load_scenario("v6_hap_loadbearing")
+    cfg_fixed = deepcopy(cfg_perm)
+    cfg_fixed["env"]["uav"]["initial_deploy"][
+        "random_uav_permutation"
+    ] = False
+
+    env_fixed = FiniteKHAPUAVMECEnv(cfg_fixed)
+    env_perm = FiniteKHAPUAVMECEnv(cfg_perm)
+    env_perm_repeat = FiniteKHAPUAVMECEnv(cfg_perm)
+    env_fixed.reset(seed=1)
+    env_perm.reset(seed=1)
+    env_perm_repeat.reset(seed=1)
+
+    np.testing.assert_allclose(
+        env_perm.state.hap_xy_m, env_fixed.state.hap_xy_m
+    )
+    np.testing.assert_allclose(
+        _sorted_rows(env_perm.state.uav_xy_m),
+        _sorted_rows(env_fixed.state.uav_xy_m),
+    )
+    assert not np.allclose(env_perm.state.uav_xy_m, env_fixed.state.uav_xy_m)
+    np.testing.assert_allclose(
+        env_perm_repeat.state.uav_xy_m, env_perm.state.uav_xy_m
+    )
 
 
 def test_permutation_invariance():

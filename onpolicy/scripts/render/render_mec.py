@@ -38,7 +38,8 @@ from onpolicy.envs.mec.MEC_env import MECEnv, ACT_DIM     # noqa: E402
 from onpolicy.envs.mec.config_loader import (             # noqa: E402
     access_coverage_radius_m, backhaul_service_radius_m)
 from onpolicy.utils.run_config import (                    # noqa: E402
-    apply_saved_args, explicit_option_names, load_model_config)
+    apply_legacy_mec_arch_default, apply_saved_args,
+    explicit_option_names, load_model_config)
 
 DT = 1.0
 
@@ -143,6 +144,11 @@ def main(argv):
     p.add_argument("--policy", choices=["auto", "heuristic", "random"], default="auto")
     p.add_argument("--model_dir", default=None, help="dir containing actor.pt")
     p.add_argument("--algorithm_name", default="mappo", choices=["mappo", "rmappo", "ippo"])
+    p.add_argument(
+        "--mec_policy_arch",
+        default="mean",
+        choices=["legacy_mean", "mean", "flat", "set"],
+    )
     p.add_argument("--episode_len", type=int, default=200)
     p.add_argument("--seed", type=int, default=20260604)
     p.add_argument("--fps", type=int, default=12)
@@ -161,6 +167,10 @@ def main(argv):
             skip={"model_dir", "policy", "episode_len", "fps", "out"},
         )
         print(f"loaded run config from {args.model_dir}")
+    if apply_legacy_mec_arch_default(
+        args, saved_args, explicit_names
+    ):
+        print("checkpoint predates architecture metadata; using legacy_mean")
 
     class _A:
         mec_scenario = args.mec_scenario

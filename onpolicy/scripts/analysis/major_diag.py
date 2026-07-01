@@ -15,7 +15,8 @@ import torch
 sys.path.insert(0, "F:/置换不变性/YijieWang-2024-on-policy")
 from onpolicy.config import get_config
 from onpolicy.envs.mec.MEC_env import MECEnv, ACT_DIM
-from onpolicy.utils.run_config import apply_saved_args, load_model_config
+from onpolicy.utils.run_config import (
+    apply_legacy_mec_arch_default, apply_saved_args, load_model_config)
 from onpolicy.algorithms.mec.mec_policy import MECPolicy
 
 MD = "F:/置换不变性/YijieWang-2024-on-policy/onpolicy/scripts/results/MEC/v3_iort_learnable/mappo/v3rc_k12/run1/models"
@@ -26,6 +27,7 @@ def load():
     a.mec_scenario = "v3_iort_learnable"; a.mec_fleet_size = None
     s = load_model_config(MD)
     if s: apply_saved_args(a, s, set(), skip={"model_dir"})
+    apply_legacy_mec_arch_default(a, s, set(), model_dir=MD)
     a.use_recurrent_policy = False; a.use_naive_recurrent_policy = False
     env = MECEnv(a); a.num_agents = env.num_agents
     pol = MECPolicy(a, env.observation_space[0], env.share_observation_space[0], env.action_space[0], torch.device("cpu"))

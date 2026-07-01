@@ -130,6 +130,22 @@ def test_v6_hap_loadbearing_link_budget():
     assert cfg["derived"]["bh_link_margin_db"] == 7.0
 
 
+def test_resource_context_keeps_native_k_as_cross_fleet_reference():
+    native = load_scenario("v6_hap_loadbearing")
+    small = load_scenario("v6_hap_loadbearing", fleet_size_k=8)
+    large = load_scenario("v6_hap_loadbearing", fleet_size_k=32)
+
+    assert native["normalization"]["resource_context"][
+        "fleet_size_reference"
+    ] == 16
+    assert small["normalization"]["resource_context"][
+        "fleet_size_reference"
+    ] == 16
+    assert large["normalization"]["resource_context"][
+        "fleet_size_reference"
+    ] == 16
+
+
 def test_validation_rejects_hardcoded_weights():
     cfg = load_scenario()
     cfg["cost"]["weights"]["omega_ovf_per_bit"] *= 1.5

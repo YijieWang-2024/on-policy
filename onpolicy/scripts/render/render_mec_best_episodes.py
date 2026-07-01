@@ -27,7 +27,11 @@ from onpolicy.envs.mec.config_loader import (
 )
 from onpolicy.envs.mec.metrics import demand_matching_w1
 from onpolicy.scripts.render.render_mec import _draw, _policy_action
-from onpolicy.utils.run_config import apply_saved_args, load_model_config
+from onpolicy.utils.run_config import (
+    apply_legacy_mec_arch_default,
+    apply_saved_args,
+    load_model_config,
+)
 
 
 DEFAULT_RUNS = (
@@ -45,6 +49,9 @@ def _load_args(model_dir: Path) -> argparse.Namespace:
     saved = load_model_config(model_dir)
     apply_saved_args(base, saved, explicit_names=set(), skip={"model_dir"})
     base.model_dir = str(model_dir)
+    apply_legacy_mec_arch_default(
+        base, saved, set(), model_dir=model_dir
+    )
     base.env_name = "MEC"
     base.use_recurrent_policy = base.algorithm_name == "rmappo"
     base.use_naive_recurrent_policy = False
@@ -124,13 +131,18 @@ def _ranked_gif_path(run_dir: Path, gif_name: str, rank: int, top_k: int) -> Pat
 
 
 def _run_one(run_dir: Path, episodes: int, seed_stride: int, fps: int,
-             gif_name: str, top_k: int) -> dict:
-    model_dir = run_dir / "models"
+             gif_name: str, top_k: int, model_subdir: str,
+             explicit_seeds: list[int] | None = None) -> dict:
+    model_dir = run_dir / model_subdir
     args = _load_args(model_dir)
     env = MECEnv(args)
     policy = _load_policy(args, env)
     base_seed = int(args.seed)
-    seeds = [base_seed + seed_stride * i for i in range(episodes)]
+    seeds = (
+        list(explicit_seeds)
+        if explicit_seeds is not None
+        else [base_seed + seed_stride * i for i in range(episodes)]
+    )
 
     scores = sorted(
         (_rollout(env, policy, args, seed, render=False) for seed in seeds),
@@ -148,8 +160,10 @@ def _run_one(run_dir: Path, episodes: int, seed_stride: int, fps: int,
         "selection": "lowest cumulative training_cost over deterministic policy eval episodes",
         "episodes": episodes,
         "top_k": top_k,
+        "model_dir": str(model_dir),
         "seed_stride": seed_stride,
         "base_seed": base_seed,
+        "evaluated_seeds": seeds,
         "best": winners[0],
         "top": winners,
         "all_scores": scores,
@@ -173,17 +187,31 @@ def main() -> None:
     parser.add_argument("--gif_name", default="best_eval_episode.gif")
     parser.add_argument("--top_k", type=int, default=1,
                         help="number of lowest-cost episodes to render per run")
+    parser.add_argument(
+        "--model_subdir",
+        default="models",
+        help="model directory relative to each run, e.g. models/best",
+    )
+    parser.add_argument(
+        "--seeds",
+        nargs="*",
+        type=int,
+        default=None,
+        help="explicit environment seeds; when set, must contain --episodes values",
+    )
     parser.add_argument("--runs", nargs="*", default=list(DEFAULT_RUNS))
     args = parser.parse_args()
     if args.top_k < 1:
         raise ValueError("--top_k must be >= 1")
+    if args.seeds is not None and len(args.seeds) != args.episodes:
+        raise ValueError("--seeds must contain exactly --episodes values")
 
     results = []
     for rel in args.runs:
         run_dir = args.root / rel
         print(f"\n=== {run_dir} ===")
         result = _run_one(run_dir, args.episodes, args.seed_stride, args.fps,
-                          args.gif_name, args.top_k)
+                          args.gif_name, args.top_k, args.model_subdir, args.seeds)
         for winner in result["top"]:
             print(
                 f"top{winner['rank']} seed={winner['seed']}  "
